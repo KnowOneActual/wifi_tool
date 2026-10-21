@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
-title Field Site Survey - Technician Workflow Assistant v2.0
+title Field Site Survey - Technician Workflow Assistant v2.0-beta
 color 1F
 
 :: Ensure Jobs root directory exists
@@ -8,13 +8,25 @@ if not exist "%~dp0Jobs" mkdir "%~dp0Jobs"
 
 cls
 echo ===============================================================================
-echo             WI-FI SITE SURVEY - FIELD TECHNICIAN ASSISTANT (v2.0)
+echo          WI-FI SITE SURVEY - FIELD TECHNICIAN ASSISTANT (v2.0-BETA)
 echo ===============================================================================
-echo  This tool guides you through a standardized site survey and packages all
-echo  RF scans, roaming link speeds, Gateway/WAN pings, Cloudflare speedtests,
-echo  LAN device inventory, and an Executive HTML Report for PM and Engineering.
+echo  [!] BETA TESTING NOTICE: Do not use as sole production deliverable yet.
+echo      All feedback and bug reports are welcome:
+echo      https://github.com/KnowOneActual/wifi_tool/issues
 echo ===============================================================================
 echo.
+
+:: Pre-Flight Check: Verify Python is installed and accessible
+where python >nul 2>nul
+if errorlevel 1 (
+    color 4F
+    echo [!] ERROR: Python 3 was not found in your system PATH.
+    echo     Please install Python 3.8+ from https://www.python.org/downloads/
+    echo     ^(Make sure to check "Add python.exe to PATH" during installation^).
+    echo.
+    pause
+    exit /b 1
+)
 
 :: Auto-detect currently connected SSID as default Target SSID
 set "DETECTED_SSID="
@@ -121,6 +133,11 @@ echo.
 echo -------------------------------------------------------------------------------
 echo [STEP 3/4] Wi-Fi Packet Capture (TShark)
 echo -------------------------------------------------------------------------------
+if not exist "C:\Program Files\Wireshark\tshark.exe" (
+    echo [!] Wireshark / TShark not detected at "C:\Program Files\Wireshark\tshark.exe".
+    echo     Skipping Step 3 packet capture ^(optional^).
+    goto SKIP_CAPTURE
+)
 set "DO_CAP="
 set /p DO_CAP="[?] Run Wi-Fi Packet Capture now? (Y/N, default Y): "
 if /i "%DO_CAP%"=="N" goto SKIP_CAPTURE
