@@ -1,0 +1,20 @@
+name: 💡 Feature Request / Beta Feedback
+description: Suggest an improvement for field technicians, PM reports, or engineering hand-offs
+title: "[Feedback]: "
+labels: ["enhancement", "beta-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        All ideas and workflow suggestions are welcome! Let us know how we can make this toolkit faster or easier in the field.
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What would you like to add, change, or improve?
+      placeholder: "e.g., Add a summary grade at the top of the PM HTML report, or allow re-scanning a waypoint if we made a typo..."
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: How would this help in the field or during engineering review? (Optional)

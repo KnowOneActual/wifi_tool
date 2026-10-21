@@ -1,0 +1,41 @@
+name: 🐛 Field Bug / Issue Report
+description: Report a problem encountered during a site survey or while running the scripts
+title: "[Bug]: "
+labels: ["bug", "beta-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing the **Wi-Fi Site Survey Toolkit (Beta)**! Fill out whatever details you have below—all feedback is welcome.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which tool / step had the issue?
+      options:
+        - START_SITE_SURVEY.bat (Full Survey Workflow)
+        - 1_Quick_Scan.bat / survey_scanner.py (RF Scanning)
+        - 2_Log_Waypoint.bat (Waypoint Logging)
+        - 3_Capture_Packets.bat / capture_packets.py (TShark Packet Capture)
+        - 4_Speed_And_Ping_Test.bat / network_diagnostics.py (Speedtest / Ping / LAN Sweep)
+        - generate_job_summary.py (HTML / Text Report Generation)
+        - Other / Setup Issue
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what went wrong or paste any error messages from the terminal window.
+      placeholder: "e.g., Step 1 scan showed 0 networks, or Cloudflare speedtest timed out..."
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Laptop / Wi-Fi Adapter / Windows Version (Optional)
+      placeholder: "e.g., Windows 11 Pro, Intel AX210 Wi-Fi 6E"
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context / Screenshots / Missing OUI Prefixes (Optional)
+      description: If a router/AP showed up as 'Standard OUI', paste the first 6 characters of its MAC address (e.g., `a0:b1:c2`) and the brand/model so we can add it!

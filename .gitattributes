@@ -1,0 +1,10 @@
+# Ensure batch files always have Windows CRLF line endings
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Python and Markdown files normalized to LF in repo
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
