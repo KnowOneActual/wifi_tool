@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
+cd /d "%~dp0"
 title Field Site Survey - Technician Workflow Assistant v2.0-beta
 color 1F
 
@@ -41,8 +42,8 @@ if not defined JOB_NAME (
     goto ASK_JOB
 )
 
-:: Clean spaces from job name for folder path
-set "CLEAN_JOB=%JOB_NAME: =_%"
+:: Sanitize job name for safe Windows folder path
+for /f "delims=" %%c in ('python -c "import os, re; s = re.sub(r'[^A-Za-z0-9_-]+', '_', os.environ.get('JOB_NAME', '')).strip('_'); print(s or 'Job')"') do set "CLEAN_JOB=%%c"
 
 set "TECH_NAME="
 set /p TECH_NAME="[?] Enter Field Technician Name or ID: "
@@ -50,8 +51,8 @@ if not defined TECH_NAME set TECH_NAME=Field_Tech
 
 set "TARGET_SSID="
 if defined DETECTED_SSID (
-    set /p TARGET_SSID="[?] Enter Target SSID (Press Enter for '%DETECTED_SSID%'): "
-    if not defined TARGET_SSID set "TARGET_SSID=%DETECTED_SSID%"
+    set /p TARGET_SSID="[?] Enter Target SSID (Press Enter for '!DETECTED_SSID!'): "
+    if not defined TARGET_SSID set "TARGET_SSID=!DETECTED_SSID!"
 ) else (
     set /p TARGET_SSID="[?] Enter Target SSID (e.g. HomeWifi1, or press Enter for ALL): "
 )
@@ -59,8 +60,8 @@ if defined DETECTED_SSID (
 set "SITE_NOTES="
 set /p SITE_NOTES="[?] Enter any Site Notes or Complaints (optional, press Enter to skip): "
 
-:: Generate Timestamp (YYYYMMDD_HHMMSS)
-for /f %%a in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "STAMP=%%a"
+:: Generate Timestamp (YYYYMMDD_HHMMSS) via Python (faster than spawning PowerShell)
+for /f %%a in ('python -c "from datetime import datetime; print(datetime.now().strftime('%%Y%%m%%d_%%H%%M%%S'))"') do set "STAMP=%%a"
 
 set "JOB_FOLDER=%~dp0Jobs\%CLEAN_JOB%_%STAMP%"
 if not exist "%JOB_FOLDER%" mkdir "%JOB_FOLDER%"
@@ -70,8 +71,8 @@ echo [+] Created Job Package Folder:
 echo     %JOB_FOLDER%
 echo.
 
-:: Save Metadata JSON using Python for safe character handling
-python -c "import json, sys; meta = {'job_name': sys.argv[1], 'tech_name': sys.argv[2], 'target_ssid': sys.argv[3], 'notes': sys.argv[4], 'date': sys.argv[5]}; json.dump(meta, open(sys.argv[6], 'w', encoding='utf-8-sig'), indent=2)" "%JOB_NAME%" "%TECH_NAME%" "%TARGET_SSID%" "%SITE_NOTES%" "%STAMP%" "%JOB_FOLDER%\job_meta.json"
+:: Save Metadata JSON using Python environment variables for safe special-character handling
+python -c "import json, os; meta = {'job_name': os.environ.get('JOB_NAME',''), 'tech_name': os.environ.get('TECH_NAME',''), 'target_ssid': os.environ.get('TARGET_SSID',''), 'notes': os.environ.get('SITE_NOTES',''), 'date': os.environ.get('STAMP','')}; f_path = os.path.join(os.environ['JOB_FOLDER'], 'job_meta.json'); f = open(f_path, 'w', encoding='utf-8'); json.dump(meta, f, indent=2); f.close()"
 
 :: ===============================================================================
 :: STEP 1: Hardware, Baseline RF Scan & Cloudflare Speedtest

@@ -84,6 +84,13 @@ def load_json_safe(path: str):
         return []
 
 
+def _safe_int(val, default: int = -100) -> int:
+    try:
+        return int(float(str(val).strip()))
+    except Exception:
+        return default
+
+
 def generate_summary(job_folder: str):
     meta_file = os.path.join(job_folder, "job_meta.json")
     meta = {}
@@ -105,25 +112,40 @@ def generate_summary(job_folder: str):
 
     def matches_target(ssid_val: str) -> bool:
         if not target_ssid:
-            return ssid_val != "<Hidden / Broadcast>"
+            return ssid_val not in ("<Hidden / Broadcast>", "<Dead Zone>", "")
         s_clean = (ssid_val or "").strip().lower()
         t_clean = target_ssid.strip().lower()
         return s_clean == t_clean
+
+    # Determine whether the target SSID has exact matches in the dataset.
+    # Only use substring fallback if the user typed a partial SSID with zero exact matches across the entire survey.
+    use_substring_fallback = False
+    if records and target_ssid:
+        exact_matches = [r for r in records if matches_target(r.get("ssid", "")) and r.get("bssid")]
+        if not exact_matches:
+            use_substring_fallback = True
+
+    def record_matches_target(r: dict) -> bool:
+        ssid_val = r.get("ssid", "")
+        if matches_target(ssid_val):
+            return True
+        if use_substring_fallback and target_ssid:
+            return target_ssid.lower() in (ssid_val or "").lower()
+        return False
 
     # Group target BSSIDs into physical APs by 5-octet MAC prefix (xx:xx:xx:xx:xx)
     ap_prefix_map = {}
     ap_details = defaultdict(lambda: {"prefix": "", "vendor": "", "radios": {}})
     if records:
-        target_recs_all = [r for r in records if matches_target(r.get("ssid", ""))]
-        if not target_recs_all and target_ssid:
-            target_recs_all = [r for r in records if target_ssid.lower() in r.get("ssid", "").lower()]
-        prefixes = sorted(list(set(r.get("bssid", "")[:14] for r in target_recs_all if len(r.get("bssid", "")) >= 14)))
+        target_recs_all = [r for r in records if record_matches_target(r) and len(r.get("bssid", "")) >= 14]
+        prefixes = sorted(list(set(r.get("bssid", "")[:14] for r in target_recs_all)))
         for idx, pref in enumerate(prefixes, start=1):
             ap_label = f"AP {idx}"
             ap_prefix_map[pref] = ap_label
             ap_details[ap_label]["prefix"] = pref
             ap_details[ap_label]["vendor"] = lookup_oui(pref)
 
+        radio_lists = defaultdict(lambda: defaultdict(list))
         for r in target_recs_all:
             bssid = r.get("bssid", "")
             pref = bssid[:14]
@@ -132,7 +154,13 @@ def generate_summary(job_folder: str):
                 band = r.get("band", "Unknown")
                 ch = r.get("channel", "?")
                 radio = r.get("radio_type", "")
-                ap_details[ap_label]["radios"][band] = f"{bssid} (Ch {ch}, {radio})"
+                entry = f"{bssid} (Ch {ch}, {radio})"
+                if entry not in radio_lists[ap_label][band]:
+                    radio_lists[ap_label][band].append(entry)
+
+        for ap_label, bands_dict in radio_lists.items():
+            for band, entries in bands_dict.items():
+                ap_details[ap_label]["radios"][band] = ", ".join(entries)
 
     def format_ap_tag(bssid: str) -> str:
         if not bssid:
@@ -163,17 +191,15 @@ def generate_summary(job_folder: str):
     for wp in waypoints:
         wp_recs = [r for r in records if r.get("waypoint") == wp]
         if target_ssid:
-            t_recs = [r for r in wp_recs if matches_target(r.get("ssid", ""))]
-            if not t_recs:
-                t_recs = [r for r in wp_recs if target_ssid.lower() in r.get("ssid", "").lower()]
+            t_recs = [r for r in wp_recs if record_matches_target(r) and r.get("bssid")]
         else:
-            t_recs = wp_recs
+            t_recs = [r for r in wp_recs if r.get("bssid")]
 
         recs_5_6 = [r for r in t_recs if "5" in r.get("band", "") or "6" in r.get("band", "")]
         recs_24 = [r for r in t_recs if "2.4" in r.get("band", "")]
 
-        best_5 = max(recs_5_6, key=lambda x: int(x.get("signal_dbm", -100))) if recs_5_6 else None
-        best_24 = max(recs_24, key=lambda x: int(x.get("signal_dbm", -100))) if recs_24 else None
+        best_5 = max(recs_5_6, key=lambda x: _safe_int(x.get("signal_dbm", -100))) if recs_5_6 else None
+        best_24 = max(recs_24, key=lambda x: _safe_int(x.get("signal_dbm", -100))) if recs_24 else None
 
         ts_raw = wp_recs[0].get("timestamp", "") if wp_recs else ""
         ts_short = ts_raw[11:19] if len(ts_raw) >= 19 else ts_raw
@@ -186,159 +212,181 @@ def generate_summary(job_folder: str):
             "telemetry": tel_by_wp.get(wp, {})
         })
 
-    # 1. Write ENGINEERING_HANDOFF_SUMMARY.txt
-    summary_path = os.path.join(job_folder, "ENGINEERING_HANDOFF_SUMMARY.txt")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("=" * 95 + "\n")
-        f.write("                  FIELD SITE SURVEY - ENGINEERING HAND-OFF PACKAGE\n")
-        f.write("=" * 95 + "\n\n")
+    # Deduplicated high channel congestion alerts (>= 35% utilization)
+    high_cu_alerts = []
+    seen_cu = set()
+    for r in records:
+        cu_val = str(r.get("cu_pct", "")).strip()
+        if cu_val.isdigit() and int(cu_val) >= 35:
+            k = (r.get("ssid", ""), r.get("bssid", ""), r.get("channel", ""))
+            if k not in seen_cu:
+                seen_cu.add(k)
+                high_cu_alerts.append({
+                    "ssid": r.get("ssid", ""),
+                    "bssid": r.get("bssid", ""),
+                    "vendor": lookup_oui(r.get("bssid", "")),
+                    "channel": r.get("channel", ""),
+                    "band": r.get("band", ""),
+                    "cu_pct": int(cu_val)
+                })
 
-        f.write("[JOB METADATA]\n")
-        f.write(f"  Project / Job Name : {meta.get('job_name', 'N/A')}\n")
-        f.write(f"  Field Technician   : {meta.get('tech_name', 'N/A')}\n")
-        f.write(f"  Audit Date & Time  : {meta.get('date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}\n")
-        f.write(f"  Target SSID        : {target_ssid or 'All Visible Networks'}\n")
-        f.write(f"  Site Notes         : {meta.get('notes', 'None')}\n")
-        f.write(f"  Output Directory   : {job_folder}\n\n")
-
-        files = os.listdir(job_folder)
-        f.write("[COLLECTED ARTIFACTS]\n")
-        for fn in sorted(files):
-            fp = os.path.join(job_folder, fn)
-            sz = os.path.getsize(fp) if os.path.isfile(fp) else 0
-            f.write(f"  - {fn:35} ({sz:,} bytes)\n")
-        f.write("\n")
-
-        if ap_details:
-            f.write(f"[DETECTED ACCESS POINTS FOR '{target_ssid or 'SITE'}']\n")
-            for ap_label, info in ap_details.items():
-                radios_str = " | ".join(f"{b}: {v}" for b, v in sorted(info["radios"].items()))
-                f.write(f"  * {ap_label:5} [{info['prefix']}:xx] ({info['vendor']}) -> {radios_str}\n")
-            f.write("\n")
-
-        if speedtest_runs:
-            f.write("[CLOUDFLARE SPEEDTEST & BUFFERBLOAT AUDIT]\n")
-            for sr in speedtest_runs:
-                loc = sr.get("waypoint", "Baseline")
-                st = sr.get("speedtest", {})
-                hop = sr.get("split_hop_ping", {})
-                gw = hop.get("gateway", {})
-                wan = hop.get("wan", {})
-                if st.get("status") == "success":
-                    f.write(
-                        f"  * [{loc}] Down: {st.get('download_mbps')} Mbps | Up: {st.get('upload_mbps')} Mbps | "
-                        f"Unloaded Ping: {st.get('unloaded_ping_ms')} ms (Jitter {st.get('unloaded_jitter_ms')} ms) | "
-                        f"Bufferbloat: +{st.get('bufferbloat_delta_ms')} ms ({st.get('bufferbloat_grade')})\n"
-                    )
-                if gw or wan:
-                    f.write(
-                        f"    Split-Hop Ping -> Gateway ({gw.get('host', 'N/A')}): {gw.get('avg_ms')} ms "
-                        f"(Loss {gw.get('loss_pct')}%) | WAN (1.1.1.1): {wan.get('avg_ms')} ms "
-                        f"(Loss {wan.get('loss_pct')}%) | {hop.get('diagnosis', '')}\n"
-                    )
-            f.write("\n")
-
-        if wp_summaries:
-            f.write("[SURVEY COVERAGE & WAYPOINT SUMMARY (5/6 GHz vs. 2.4 GHz)]\n")
-            f.write(f"  Total Waypoints Logged : {len(wp_summaries)}\n")
-            f.write(f"  Total BSSID Records    : {len(records)}\n\n")
-            f.write("  " + "-" * 91 + "\n")
-            f.write(f"  {'Waypoint / Room':24} | {'Best 5/6 GHz (AP / Ch)':28} | {'Best 2.4 GHz (AP / Ch)':28} | {'Ping GW/WAN'}\n")
-            f.write("  " + "-" * 91 + "\n")
-
-            for ws in wp_summaries:
-                wp = ws["waypoint"][:24]
-                b5 = ws["best_5"]
-                b24 = ws["best_24"]
-                tel = ws["telemetry"]
-
-                if b5:
-                    s5 = f"{b5.get('signal_dbm')} dBm {format_ap_tag(b5.get('bssid'))} c{b5.get('channel')}"
-                else:
-                    s5 = "NO 5/6G SIGNAL"
-
-                if b24:
-                    s24 = f"{b24.get('signal_dbm')} dBm {format_ap_tag(b24.get('bssid'))} c{b24.get('channel')}"
-                else:
-                    s24 = "NO 2.4G SIGNAL"
-
-                if tel and tel.get("gw_avg_ms"):
-                    ping_str = f"{tel.get('gw_avg_ms')}/{tel.get('wan_avg_ms')} ms"
-                else:
-                    ping_str = "-"
-
-                f.write(f"  {wp:24} | {s5:28} | {s24:28} | {ping_str}\n")
-            f.write("  " + "-" * 91 + "\n\n")
-
-            # High utilization alerts
-            high_cu = [
-                r for r in records
-                if r.get("cu_pct") and str(r.get("cu_pct")).isdigit() and int(r.get("cu_pct")) >= 35
-            ]
-            if high_cu:
-                f.write("[!] ENGINEERING ALERTS: HIGH CHANNEL CONGESTION (>= 35% Utilization)\n")
-                seen_cu = set()
-                for h in high_cu:
-                    k = (h.get("ssid"), h.get("bssid"), h.get("channel"))
-                    if k not in seen_cu:
-                        seen_cu.add(k)
-                        vendor = lookup_oui(h.get("bssid", ""))
-                        f.write(
-                            f"  * SSID: {h.get('ssid', ''):20} | BSSID: {h.get('bssid')} ({vendor}) | "
-                            f"Ch {h.get('channel', ''):3} ({h.get('band')}) | Utilization: {h.get('cu_pct')}%\n"
-                        )
-                f.write("\n")
-
-        if lan_devices:
-            f.write(f"[DISCOVERED LAN DEVICES ({len(lan_devices)} Active Hosts)]\n")
-            for d in lan_devices:
-                f.write(f"  * {d.get('ip', ''):15} | {d.get('mac', ''):17} | {d.get('vendor', ''):32} | {d.get('role', '')}\n")
-            f.write("\n")
-
-        f.write("=" * 95 + "\n")
-        f.write("                     END OF ENGINEERING HAND-OFF SUMMARY\n")
-        f.write("=" * 95 + "\n")
-
-    print(f"[+] Engineering hand-off summary created: {summary_path}")
-
-    # 2. Generate Executive HTML Report (PM_SITE_SURVEY_REPORT.html)
+    # 1. Generate Executive HTML Report first so its file size is captured in the artifact inventory
     html_path = os.path.join(job_folder, "PM_SITE_SURVEY_REPORT.html")
     generate_html_report(
         html_path, meta, target_ssid, ap_details, wp_summaries,
-        speedtest_runs, lan_devices, records, format_ap_tag
+        speedtest_runs, lan_devices, high_cu_alerts, format_ap_tag
     )
+
+    # 2. Build and Write ENGINEERING_HANDOFF_SUMMARY.txt
+    summary_path = os.path.join(job_folder, "ENGINEERING_HANDOFF_SUMMARY.txt")
+    body_lines = []
+
+    if ap_details:
+        body_lines.append(f"[DETECTED ACCESS POINTS FOR '{target_ssid or 'SITE'}']")
+        for ap_label, info in ap_details.items():
+            radios_str = " | ".join(f"{b}: {v}" for b, v in sorted(info["radios"].items()))
+            body_lines.append(f"  * {ap_label:5} [{info['prefix']}:xx] ({info['vendor']}) -> {radios_str}")
+        body_lines.append("")
+
+    if speedtest_runs:
+        body_lines.append("[CLOUDFLARE SPEEDTEST & BUFFERBLOAT AUDIT]")
+        for sr in speedtest_runs:
+            loc = sr.get("waypoint", "Baseline")
+            st = sr.get("speedtest", {})
+            hop = sr.get("split_hop_ping", {})
+            gw = hop.get("gateway", {})
+            wan = hop.get("wan", {})
+            if st.get("status") == "success":
+                body_lines.append(
+                    f"  * [{loc}] Down: {st.get('download_mbps')} Mbps | Up: {st.get('upload_mbps')} Mbps | "
+                    f"Unloaded Ping: {st.get('unloaded_ping_ms')} ms (Jitter {st.get('unloaded_jitter_ms')} ms) | "
+                    f"Bufferbloat: +{st.get('bufferbloat_delta_ms')} ms ({st.get('bufferbloat_grade')})"
+                )
+            if gw or wan:
+                body_lines.append(
+                    f"    Split-Hop Ping -> Gateway ({gw.get('host', 'N/A')}): {gw.get('avg_ms')} ms "
+                    f"(Loss {gw.get('loss_pct')}%) | WAN (1.1.1.1): {wan.get('avg_ms')} ms "
+                    f"(Loss {wan.get('loss_pct')}%) | {hop.get('diagnosis', '')}"
+                )
+        body_lines.append("")
+
+    if wp_summaries:
+        body_lines.append("[SURVEY COVERAGE & WAYPOINT SUMMARY (5/6 GHz vs. 2.4 GHz)]")
+        body_lines.append(f"  Total Waypoints Logged : {len(wp_summaries)}")
+        body_lines.append(f"  Total BSSID Records    : {len(records)}")
+        body_lines.append("")
+        body_lines.append("  " + "-" * 91)
+        body_lines.append(f"  {'Waypoint / Room':24} | {'Best 5/6 GHz (AP / Ch)':28} | {'Best 2.4 GHz (AP / Ch)':28} | {'Ping GW/WAN'}")
+        body_lines.append("  " + "-" * 91)
+
+        for ws in wp_summaries:
+            wp = ws["waypoint"][:24]
+            b5 = ws["best_5"]
+            b24 = ws["best_24"]
+            tel = ws["telemetry"]
+
+            if b5:
+                s5 = f"{b5.get('signal_dbm')} dBm {format_ap_tag(b5.get('bssid'))} c{b5.get('channel')}"
+            else:
+                s5 = "NO 5/6G SIGNAL"
+
+            if b24:
+                s24 = f"{b24.get('signal_dbm')} dBm {format_ap_tag(b24.get('bssid'))} c{b24.get('channel')}"
+            else:
+                s24 = "NO 2.4G SIGNAL"
+
+            if tel and tel.get("gw_avg_ms"):
+                ping_str = f"{tel.get('gw_avg_ms')}/{tel.get('wan_avg_ms')} ms"
+            else:
+                ping_str = "-"
+
+            body_lines.append(f"  {wp:24} | {s5:28} | {s24:28} | {ping_str}")
+        body_lines.append("  " + "-" * 91)
+        body_lines.append("")
+
+        if high_cu_alerts:
+            body_lines.append("[!] ENGINEERING ALERTS: HIGH CHANNEL CONGESTION (>= 35% Utilization)")
+            for h in high_cu_alerts:
+                body_lines.append(
+                    f"  * SSID: {h['ssid']:20} | BSSID: {h['bssid']} ({h['vendor']}) | "
+                    f"Ch {str(h['channel']):3} ({h['band']}) | Utilization: {h['cu_pct']}%"
+                )
+            body_lines.append("")
+
+    if lan_devices:
+        body_lines.append(f"[DISCOVERED LAN DEVICES ({len(lan_devices)} Active Hosts)]")
+        for d in lan_devices:
+            body_lines.append(f"  * {d.get('ip', ''):15} | {d.get('mac', ''):17} | {d.get('vendor', ''):32} | {d.get('role', '')}")
+        body_lines.append("")
+
+    body_lines.append("=" * 95)
+    body_lines.append("                     END OF ENGINEERING HAND-OFF SUMMARY")
+    body_lines.append("=" * 95)
+
+    header_lines = [
+        "=" * 95,
+        "                  FIELD SITE SURVEY - ENGINEERING HAND-OFF PACKAGE",
+        "=" * 95,
+        "",
+        "[JOB METADATA]",
+        f"  Project / Job Name : {meta.get('job_name', 'N/A')}",
+        f"  Field Technician   : {meta.get('tech_name', 'N/A')}",
+        f"  Audit Date & Time  : {meta.get('date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}",
+        f"  Target SSID        : {target_ssid or 'All Visible Networks'}",
+        f"  Site Notes         : {meta.get('notes', 'None')}",
+        f"  Output Directory   : {job_folder}",
+        "",
+        "[COLLECTED ARTIFACTS]",
+    ]
+
+    existing_files = [fn for fn in sorted(os.listdir(job_folder)) if fn != "ENGINEERING_HANDOFF_SUMMARY.txt"]
+    for fn in existing_files:
+        fp = os.path.join(job_folder, fn)
+        sz = os.path.getsize(fp) if os.path.isfile(fp) else 0
+        header_lines.append(f"  - {fn:35} ({sz:,} bytes)")
+    header_lines.append("")
+
+    full_text = "\n".join(header_lines + body_lines) + "\n"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(full_text)
+
+    print(f"[+] Engineering hand-off summary created: {summary_path}")
     print(f"[+] Executive PM HTML Report created   : {html_path}")
 
 
 def generate_html_report(
     html_path, meta, target_ssid, ap_details, wp_summaries,
-    speedtest_runs, lan_devices, records, format_ap_tag
+    speedtest_runs, lan_devices, high_cu_alerts, format_ap_tag
 ):
-    job_name = html.escape(meta.get("job_name", "Site Survey"))
-    tech_name = html.escape(meta.get("tech_name", "Field Tech"))
-    date_str = html.escape(meta.get("date", datetime.now().strftime("%Y-%m-%d %H:%M")))
-    ssid_str = html.escape(target_ssid or "All Visible Networks")
-    notes_str = html.escape(meta.get("notes", "") or "Standard site walkthrough & RF verification.")
+    job_name = html.escape(str(meta.get("job_name", "Site Survey")))
+    tech_name = html.escape(str(meta.get("tech_name", "Field Tech")))
+    date_str = html.escape(str(meta.get("date", datetime.now().strftime("%Y-%m-%d %H:%M"))))
+    ssid_str = html.escape(str(target_ssid or "All Visible Networks"))
+    notes_str = html.escape(str(meta.get("notes", "") or "Standard site walkthrough & RF verification."))
 
     # Build Waypoint Rows HTML
     wp_rows_html = ""
     for ws in wp_summaries:
-        wp_name = html.escape(ws["waypoint"])
-        t_str = html.escape(ws["time"] or "-")
+        wp_name = html.escape(str(ws["waypoint"]))
+        t_str = html.escape(str(ws["time"] or "-"))
         b5 = ws["best_5"]
         b24 = ws["best_24"]
         tel = ws["telemetry"]
 
         if b5:
-            dbm5 = int(b5.get("signal_dbm", -100))
-            s5_html = f"<strong>{dbm5} dBm</strong> ({b5.get('signal_pct')}%)<br><span class='sub'>{html.escape(format_ap_tag(b5.get('bssid')))} &bull; Ch {b5.get('channel')}</span>"
+            dbm5 = _safe_int(b5.get("signal_dbm", -100))
+            pct5 = html.escape(str(b5.get("signal_pct", "")))
+            ch5 = html.escape(str(b5.get("channel", "")))
+            s5_html = f"<strong>{dbm5} dBm</strong> ({pct5}%)<br><span class='sub'>{html.escape(format_ap_tag(b5.get('bssid')))} &bull; Ch {ch5}</span>"
         else:
             dbm5 = -100
             s5_html = "<span class='badge badge-bad'>No 5G Signal</span>"
 
         if b24:
-            dbm24 = int(b24.get("signal_dbm", -100))
-            s24_html = f"<strong>{dbm24} dBm</strong> ({b24.get('signal_pct')}%)<br><span class='sub'>{html.escape(format_ap_tag(b24.get('bssid')))} &bull; Ch {b24.get('channel')}</span>"
+            dbm24 = _safe_int(b24.get("signal_dbm", -100))
+            pct24 = html.escape(str(b24.get("signal_pct", "")))
+            ch24 = html.escape(str(b24.get("channel", "")))
+            s24_html = f"<strong>{dbm24} dBm</strong> ({pct24}%)<br><span class='sub'>{html.escape(format_ap_tag(b24.get('bssid')))} &bull; Ch {ch24}</span>"
         else:
             dbm24 = -100
             s24_html = "<span class='sub'>N/A</span>"
@@ -346,9 +394,14 @@ def generate_html_report(
         # Active link + ping
         link_str = "-"
         if tel and tel.get("tx_rate_mbps"):
-            link_str = f"{tel.get('tx_rate_mbps')}/{tel.get('rx_rate_mbps')} Mbps<br><span class='sub'>GW: {tel.get('gw_avg_ms')}ms | WAN: {tel.get('wan_avg_ms')}ms</span>"
+            tx = html.escape(str(tel.get("tx_rate_mbps", "")))
+            rx = html.escape(str(tel.get("rx_rate_mbps", "")))
+            gw_ms = html.escape(str(tel.get("gw_avg_ms", "")))
+            wan_ms = html.escape(str(tel.get("wan_avg_ms", "")))
+            link_str = f"{tx}/{rx} Mbps<br><span class='sub'>GW: {gw_ms}ms | WAN: {wan_ms}ms</span>"
             if tel.get("download_mbps"):
-                link_str += f"<br><strong>DL: {tel.get('download_mbps')} Mbps</strong>"
+                dl_m = html.escape(str(tel.get("download_mbps", "")))
+                link_str += f"<br><strong>DL: {dl_m} Mbps</strong>"
 
         if dbm5 >= -62:
             badge = "<span class='badge badge-good'>Excellent</span>"
@@ -374,19 +427,27 @@ def generate_html_report(
     if speedtest_runs:
         st_rows = ""
         for sr in speedtest_runs:
-            loc = html.escape(sr.get("waypoint", "Baseline"))
+            loc = html.escape(str(sr.get("waypoint", "Baseline")))
             st = sr.get("speedtest", {})
             hop = sr.get("split_hop_ping", {})
             gw = hop.get("gateway", {})
             wan = hop.get("wan", {})
+            dl_val = html.escape(str(st.get("download_mbps", "N/A")))
+            ul_val = html.escape(str(st.get("upload_mbps", "N/A")))
+            gw_avg = html.escape(str(gw.get("avg_ms", "N/A")))
+            gw_jit = html.escape(str(gw.get("jitter_ms", 0)))
+            wan_avg = html.escape(str(wan.get("avg_ms", "N/A")))
+            dns_val = html.escape(str(hop.get("dns_lookup_ms", "N/A")))
+            bb_delta = html.escape(str(st.get("bufferbloat_delta_ms", 0)))
+            bb_grade = html.escape(str(st.get("bufferbloat_grade", "N/A")))
             st_rows += f"""
             <tr>
               <td><strong>{loc}</strong></td>
-              <td><strong>{st.get('download_mbps', 'N/A')} Mbps</strong></td>
-              <td><strong>{st.get('upload_mbps', 'N/A')} Mbps</strong></td>
-              <td>{gw.get('avg_ms', 'N/A')} ms (Jitter {gw.get('jitter_ms', 0)} ms)</td>
-              <td>{wan.get('avg_ms', 'N/A')} ms (DNS {hop.get('dns_lookup_ms', 'N/A')} ms)</td>
-              <td>+{st.get('bufferbloat_delta_ms', 0)} ms ({html.escape(str(st.get('bufferbloat_grade', 'N/A')))})</td>
+              <td><strong>{dl_val} Mbps</strong></td>
+              <td><strong>{ul_val} Mbps</strong></td>
+              <td>{gw_avg} ms (Jitter {gw_jit} ms)</td>
+              <td>{wan_avg} ms (DNS {dns_val} ms)</td>
+              <td>+{bb_delta} ms ({bb_grade})</td>
             </tr>"""
         st_html = f"""
         <h2>Cloudflare Speedtest, Split-Hop Ping &amp; Bufferbloat</h2>
@@ -418,6 +479,60 @@ def generate_html_report(
           <td><code>{r5}</code></td>
           <td><code>{r6}</code></td>
         </tr>"""
+
+    # Build High Congestion HTML section if any
+    cu_html = ""
+    if high_cu_alerts:
+        cu_rows = ""
+        for h in high_cu_alerts:
+            cu_rows += f"""
+            <tr>
+              <td><strong>{html.escape(str(h['ssid']))}</strong></td>
+              <td><code>{html.escape(str(h['bssid']))}</code></td>
+              <td>{html.escape(str(h['vendor']))}</td>
+              <td>{html.escape(str(h['band']))} &bull; Ch {html.escape(str(h['channel']))}</td>
+              <td><span class='badge badge-warn'>{int(h['cu_pct'])}%</span></td>
+            </tr>"""
+        cu_html = f"""
+        <h2>RF Congestion &amp; Interference Alerts (&ge; 35% Channel Utilization)</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>SSID</th>
+              <th>BSSID</th>
+              <th>Hardware Vendor (OUI)</th>
+              <th>Band &amp; Channel</th>
+              <th>Channel Utilization</th>
+            </tr>
+          </thead>
+          <tbody>{cu_rows}</tbody>
+        </table>"""
+
+    # Build LAN Devices HTML section if any
+    lan_html = ""
+    if lan_devices:
+        lan_rows = ""
+        for d in lan_devices:
+            lan_rows += f"""
+            <tr>
+              <td><code>{html.escape(str(d.get('ip', '')))}</code></td>
+              <td><code>{html.escape(str(d.get('mac', '')))}</code></td>
+              <td>{html.escape(str(d.get('vendor', '')))}</td>
+              <td>{html.escape(str(d.get('role', '')))}</td>
+            </tr>"""
+        lan_html = f"""
+        <h2>Discovered LAN Devices ({len(lan_devices)} Active Hosts)</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>IPv4 Address</th>
+              <th>MAC Address</th>
+              <th>Hardware Vendor (OUI)</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>{lan_rows}</tbody>
+        </table>"""
 
     doc = f"""<!DOCTYPE html>
 <html lang="en">
@@ -492,6 +607,9 @@ def generate_html_report(
       </thead>
       <tbody>{ap_rows}</tbody>
     </table>
+
+    {cu_html}
+    {lan_html}
   </div>
 </body>
 </html>"""

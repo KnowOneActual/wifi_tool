@@ -59,22 +59,53 @@ def force_wlan_scan(wait_seconds: float = 3.0) -> bool:
     """
     Trigger a live hardware RF scan across all bands using Windows wlanapi.dll (WlanScan)
     so `netsh wlan show networks mode=bssid` returns fresh beacon data instead of cached data.
+    Uses explicit 64-bit safe ctypes signatures and guaranteed handle/memory cleanup.
     """
+    client_handle = wintypes.HANDLE()
+    p_iface_list = ctypes.POINTER(WLAN_INTERFACE_INFO_LIST)()
+    wlanapi = None
     try:
         wlanapi = ctypes.windll.LoadLibrary("wlanapi.dll")
-        negotiated_version = wintypes.DWORD()
-        client_handle = wintypes.HANDLE()
 
+        wlanapi.WlanOpenHandle.argtypes = [
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        wlanapi.WlanOpenHandle.restype = wintypes.DWORD
+
+        wlanapi.WlanEnumInterfaces.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.POINTER(WLAN_INTERFACE_INFO_LIST)),
+        ]
+        wlanapi.WlanEnumInterfaces.restype = wintypes.DWORD
+
+        wlanapi.WlanScan.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(GUID),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        wlanapi.WlanScan.restype = wintypes.DWORD
+
+        wlanapi.WlanFreeMemory.argtypes = [ctypes.c_void_p]
+        wlanapi.WlanFreeMemory.restype = None
+
+        wlanapi.WlanCloseHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        wlanapi.WlanCloseHandle.restype = wintypes.DWORD
+
+        negotiated_version = wintypes.DWORD()
         res = wlanapi.WlanOpenHandle(
             wintypes.DWORD(2), None, ctypes.byref(negotiated_version), ctypes.byref(client_handle)
         )
         if res != 0:
             return False
 
-        p_iface_list = ctypes.POINTER(WLAN_INTERFACE_INFO_LIST)()
         res = wlanapi.WlanEnumInterfaces(client_handle, None, ctypes.byref(p_iface_list))
-        if res != 0:
-            wlanapi.WlanCloseHandle(client_handle, None)
+        if res != 0 or not p_iface_list:
             return False
 
         num_items = p_iface_list.contents.dwNumberOfItems
@@ -91,14 +122,23 @@ def force_wlan_scan(wait_seconds: float = 3.0) -> bool:
             if scan_res == 0:
                 triggered = True
 
-        wlanapi.WlanFreeMemory(p_iface_list)
-        wlanapi.WlanCloseHandle(client_handle, None)
-
         if triggered and wait_seconds > 0:
             time.sleep(wait_seconds)
         return triggered
     except Exception:
         return False
+    finally:
+        if wlanapi is not None:
+            if p_iface_list:
+                try:
+                    wlanapi.WlanFreeMemory(p_iface_list)
+                except Exception:
+                    pass
+            if client_handle and client_handle.value:
+                try:
+                    wlanapi.WlanCloseHandle(client_handle, None)
+                except Exception:
+                    pass
 
 
 def run_netsh_scan(live_refresh: bool = True):
@@ -221,8 +261,21 @@ def record_waypoint(waypoint_name, target_ssid=None, log_file="survey_log.csv", 
         networks = [n for n in networks if target_ssid.lower() in n.get("ssid", "").lower()]
 
     if not networks:
-        print(f"No networks found matching '{target_ssid or ''}' at waypoint '{clean_waypoint}'.")
-        return
+        print(f"    [!] No networks detected matching '{target_ssid or 'any'}' at '{clean_waypoint}' (Logging as Dead Zone).")
+        networks = [{
+            "timestamp": datetime.now().isoformat(),
+            "ssid": target_ssid or "<Dead Zone>",
+            "bssid": "",
+            "band": "None",
+            "channel": "",
+            "radio_type": "",
+            "signal_dbm": -100,
+            "signal_pct": 0,
+            "cu_pct": "",
+            "stations": "",
+            "auth": "",
+            "enc": ""
+        }]
 
     file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
     with open(log_file, "a", newline="", encoding="utf-8") as f:

@@ -173,28 +173,110 @@ def get_active_wifi_interface() -> dict:
     if info["true_rssi_dbm"] is None and info["signal_pct"] > 0:
         info["true_rssi_dbm"] = int((info["signal_pct"] / 2) - 100)
 
-    # Extract IPv4 and Default Gateway from ipconfig
+    # Extract IPv4, Subnet Mask, and Default Gateway from ipconfig for the active Wi-Fi interface
     ip_proc = subprocess.run(["ipconfig"], capture_output=True, text=True, errors="replace")
     if ip_proc.returncode == 0:
-        in_wifi = False
-        for line in ip_proc.stdout.splitlines():
-            if "adapter" in line.lower() and ":" in line:
-                in_wifi = ("wi-fi" in line.lower() or "wireless" in line.lower())
-                continue
-            if in_wifi or not info["gateway"]:
-                if "IPv4 Address" in line and ":" in line:
-                    ip_val = line.split(":", 1)[1].strip()
-                    ip_val = re.sub(r"\(.*\)", "", ip_val).strip()
-                    if not ip_val.startswith("169.254."):
-                        info["ipv4"] = ip_val
-                elif "Subnet Mask" in line and ":" in line and info["ipv4"]:
-                    info["subnet_mask"] = line.split(":", 1)[1].strip()
-                elif "Default Gateway" in line and ":" in line:
-                    gw_val = line.split(":", 1)[1].strip()
-                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", gw_val):
-                        info["gateway"] = gw_val
+        parsed_ip = _parse_ipconfig_wifi(ip_proc.stdout, info.get("interface_name", "Wi-Fi"))
+        info["ipv4"] = parsed_ip["ipv4"]
+        info["subnet_mask"] = parsed_ip["subnet_mask"]
+        info["gateway"] = parsed_ip["gateway"]
 
     return info
+
+
+def _parse_ipconfig_wifi(ipconfig_output: str, interface_name: str = "Wi-Fi") -> dict:
+    """
+    Parse `ipconfig` output to extract IPv4, Subnet Mask, and Default Gateway specifically
+    for the target Wi-Fi adapter without leaking values from virtual, VPN, or Ethernet adapters.
+    """
+    res = {"ipv4": "", "subnet_mask": "", "gateway": ""}
+    if not ipconfig_output:
+        return res
+
+    target_name = (interface_name or "Wi-Fi").strip().lower()
+    sections = []
+    current_header = ""
+    current_lines = []
+
+    for raw_line in ipconfig_output.splitlines():
+        # Adapter headers start at column 0 (not indented) and end with ':'
+        if raw_line and not raw_line[0].isspace() and raw_line.strip().endswith(":"):
+            if current_header:
+                sections.append((current_header, current_lines))
+            current_header = raw_line.strip()[:-1].strip().lower()
+            current_lines = []
+        elif current_header:
+            current_lines.append(raw_line)
+    if current_header:
+        sections.append((current_header, current_lines))
+
+    def extract_from_lines(lines: list) -> dict:
+        out = {"ipv4": "", "subnet_mask": "", "gateway": ""}
+        expect_gw_continuation = False
+        for line in lines:
+            s = line.strip()
+            if not s:
+                expect_gw_continuation = False
+                continue
+            if "media disconnected" in s.lower():
+                return {"ipv4": "", "subnet_mask": "", "gateway": ""}
+
+            if expect_gw_continuation and ":" not in s:
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", s):
+                    out["gateway"] = s
+                expect_gw_continuation = False
+                continue
+            expect_gw_continuation = False
+
+            if "IPv4 Address" in line and ":" in line:
+                ip_val = line.split(":", 1)[1].strip()
+                ip_val = re.sub(r"\(.*\)", "", ip_val).strip()
+                if not ip_val.startswith("169.254."):
+                    out["ipv4"] = ip_val
+            elif "Subnet Mask" in line and ":" in line:
+                out["subnet_mask"] = line.split(":", 1)[1].strip()
+            elif "Default Gateway" in line and ":" in line:
+                gw_val = line.split(":", 1)[1].strip()
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", gw_val):
+                    out["gateway"] = gw_val
+                else:
+                    # IPv6 gateway may be on first line and IPv4 gateway on the next indented line
+                    expect_gw_continuation = True
+        return out
+
+    # 1. Exact adapter name match (e.g. "wireless lan adapter wi-fi")
+    for header, lines in sections:
+        if header.endswith(f"adapter {target_name}") or header == target_name:
+            cand = extract_from_lines(lines)
+            if cand["ipv4"] or cand["gateway"]:
+                return cand
+
+    # 2. Fallback: any connected wireless/wi-fi adapter (excluding Wi-Fi Direct virtual adapters)
+    for header, lines in sections:
+        if ("wi-fi" in header or "wireless" in header) and "local area connection*" not in header:
+            cand = extract_from_lines(lines)
+            if cand["ipv4"] or cand["gateway"]:
+                return cand
+
+    # 3. Last resort: any adapter with a valid IPv4 + Default Gateway
+    for header, lines in sections:
+        cand = extract_from_lines(lines)
+        if cand["ipv4"] and cand["gateway"]:
+            return cand
+
+    return res
+
+
+def _parse_ping_sample(out: str):
+    """Extract latency in ms from a single Windows `ping` output, handling `time<1ms` properly."""
+    if not out:
+        return None
+    if re.search(r"time\s*<\s*1\s*ms", out, re.IGNORECASE):
+        return 0.5
+    m = re.search(r"time\s*=\s*(\d+(?:\.\d+)?)\s*ms", out, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return None
 
 
 def ping_target(host: str, count: int = 4, timeout_ms: int = 1000) -> dict:
@@ -210,22 +292,20 @@ def ping_target(host: str, count: int = 4, timeout_ms: int = 1000) -> dict:
         "jitter_ms": None,
         "samples_ms": []
     }
-    if not host:
+    if not host or count <= 0:
         return result
 
     samples = []
-    for _ in range(count):
+    for i in range(count):
         proc = subprocess.run(
             ["ping", "-n", "1", "-w", str(timeout_ms), host],
             capture_output=True, text=True, errors="replace"
         )
-        out = proc.stdout
-        m = re.search(r"time[=<](\d+)\s*ms", out, re.IGNORECASE)
-        if m:
-            samples.append(float(m.group(1)))
-        elif "time<1ms" in out.lower():
-            samples.append(0.5)
-        time.sleep(0.05)
+        val = _parse_ping_sample(proc.stdout)
+        if val is not None:
+            samples.append(val)
+        if i + 1 < count:
+            time.sleep(0.03)
 
     result["received"] = len(samples)
     result["loss_pct"] = round(((count - len(samples)) / count) * 100.0, 1)
@@ -353,7 +433,6 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
             result["unloaded_jitter_ms"] = round(statistics.pstdev(http_rtts), 1)
 
         # 3. Download Throughput Test + Simultaneous Loaded Ping (Bufferbloat)
-        dl_bytes_total = 0
         dl_stop = False
 
         def loaded_ping_worker(target_list):
@@ -367,8 +446,8 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
         ping_thread = ThreadPoolExecutor(max_workers=1)
         ping_fut = ping_thread.submit(loaded_ping_worker, loaded_dl_samples)
 
-        def download_worker(chunk_size_bytes):
-            nonlocal dl_bytes_total
+        def download_worker(chunk_size_bytes) -> int:
+            worker_bytes = 0
             t_end = time.perf_counter() + (duration_target_sec * 0.65)
             while time.perf_counter() < t_end:
                 url = f"https://speed.cloudflare.com/__down?bytes={chunk_size_bytes}"
@@ -379,38 +458,42 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
                             buf = resp.read(65536)
                             if not buf:
                                 break
-                            dl_bytes_total += len(buf)
+                            worker_bytes += len(buf)
                             if time.perf_counter() >= t_end:
                                 break
                 except Exception:
                     break
+            return worker_bytes
 
         t_dl_start = time.perf_counter()
         # Run 3 parallel download streams for accurate Wi-Fi throughput saturation
         with ThreadPoolExecutor(max_workers=3) as dl_ex:
             futs = [dl_ex.submit(download_worker, 15_000_000) for _ in range(3)]
-            for f in as_completed(futs):
-                pass
+            dl_bytes_total = sum(f.result() for f in as_completed(futs))
         t_dl_elapsed = max(0.1, time.perf_counter() - t_dl_start)
         dl_stop = True
-        ping_fut.result(timeout=2)
-        ping_thread.shutdown(wait=False)
+        try:
+            ping_fut.result(timeout=2)
+        except Exception:
+            pass
+        finally:
+            ping_thread.shutdown(wait=False)
 
         result["download_mbps"] = round((dl_bytes_total * 8) / (t_dl_elapsed * 1_000_000), 1)
         if loaded_dl_samples:
             result["loaded_dl_ping_ms"] = round(sum(loaded_dl_samples) / len(loaded_dl_samples), 1)
 
         # 4. Upload Throughput Test + Simultaneous Loaded Ping
-        ul_bytes_total = 0
         dl_stop = False
         loaded_ul_samples = []
         ping_thread_ul = ThreadPoolExecutor(max_workers=1)
         ping_fut_ul = ping_thread_ul.submit(loaded_ping_worker, loaded_ul_samples)
 
-        payload = b"0" * 1_000_000  # 1 MB upload block
+        # Use 256 KB upload blocks so slow residential uplinks (<2 Mbps) don't time out mid-block
+        payload = b"0" * 256_000
 
-        def upload_worker():
-            nonlocal ul_bytes_total
+        def upload_worker() -> int:
+            worker_bytes = 0
             t_end = time.perf_counter() + (duration_target_sec * 0.45)
             while time.perf_counter() < t_end:
                 req_ul = urllib.request.Request(
@@ -422,19 +505,23 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
                 try:
                     with urllib.request.urlopen(req_ul, timeout=5, context=ctx) as resp:
                         resp.read()
-                    ul_bytes_total += len(payload)
+                    worker_bytes += len(payload)
                 except Exception:
                     break
+            return worker_bytes
 
         t_ul_start = time.perf_counter()
         with ThreadPoolExecutor(max_workers=2) as ul_ex:
             futs = [ul_ex.submit(upload_worker) for _ in range(2)]
-            for f in as_completed(futs):
-                pass
+            ul_bytes_total = sum(f.result() for f in as_completed(futs))
         t_ul_elapsed = max(0.1, time.perf_counter() - t_ul_start)
         dl_stop = True
-        ping_fut_ul.result(timeout=2)
-        ping_thread_ul.shutdown(wait=False)
+        try:
+            ping_fut_ul.result(timeout=2)
+        except Exception:
+            pass
+        finally:
+            ping_thread_ul.shutdown(wait=False)
 
         result["upload_mbps"] = round((ul_bytes_total * 8) / (t_ul_elapsed * 1_000_000), 1)
         if loaded_ul_samples:
@@ -466,11 +553,73 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
     return result
 
 
+def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = "") -> list:
+    """
+    Parse `arp -a` output into enriched LAN device dicts, filtering out multicast/broadcast/APIPA
+    and prioritizing the active Wi-Fi interface's subnet when multiple interfaces exist.
+    """
+    if not arp_output:
+        return []
+
+    subnet_prefix = ""
+    if local_ipv4 and re.match(r"^\d+\.\d+\.\d+\.\d+$", local_ipv4):
+        parts = local_ipv4.split(".")
+        subnet_prefix = f"{parts[0]}.{parts[1]}.{parts[2]}."
+
+    devices = []
+    seen_ips = set()
+    current_iface_ip = ""
+
+    for line in arp_output.splitlines():
+        s = line.strip()
+        if s.lower().startswith("interface:"):
+            m_if = re.search(r"(\d+\.\d+\.\d+\.\d+)", s)
+            current_iface_ip = m_if.group(1) if m_if else ""
+            continue
+
+        # If we know the active Wi-Fi IPv4, skip ARP tables belonging to unrelated virtual/loopback adapters
+        if local_ipv4 and current_iface_ip and current_iface_ip != local_ipv4:
+            if subnet_prefix and not current_iface_ip.startswith(subnet_prefix):
+                continue
+
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)", s)
+        if m:
+            ip_addr, mac_raw, arp_type = m.group(1), m.group(2).lower().replace("-", ":"), m.group(3).lower()
+            first_octet = int(ip_addr.split(".")[0])
+            # Skip multicast/broadcast (224.x+, .255, ff:ff:ff:ff:ff:ff) and APIPA (169.254.x.x)
+            if first_octet >= 224 or ip_addr.endswith(".255") or mac_raw == "ff:ff:ff:ff:ff:ff":
+                continue
+            if ip_addr.startswith("169.254.") and not local_ipv4.startswith("169.254."):
+                continue
+            if subnet_prefix and not ip_addr.startswith(subnet_prefix):
+                continue
+            if ip_addr in seen_ips:
+                continue
+            seen_ips.add(ip_addr)
+
+            role = "LAN Host"
+            if ip_addr == gateway_ip:
+                role = "Default Gateway / Router"
+            elif ip_addr == local_ipv4:
+                role = "Survey Laptop"
+
+            devices.append({
+                "ip": ip_addr,
+                "mac": mac_raw,
+                "vendor": lookup_oui(mac_raw),
+                "type": arp_type,
+                "role": role
+            })
+
+    devices.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+    return devices
+
+
 def run_lan_discovery(job_folder: str) -> list:
     """
-    Perform a fast 2.5-second parallel ping sweep of the local /24 subnet to populate the Windows
+    Perform a fast parallel ARP warmup + ping sweep of the local /24 subnet to populate the Windows
     ARP cache, then capture `ipconfig /all` and `arp -a`, and write an enriched `lan_devices.csv`
-    with IP, MAC, Vendor (OUI), and Hostname.
+    with IP, MAC, Vendor (OUI), and Role.
     """
     os.makedirs(job_folder, exist_ok=True)
     wifi = get_active_wifi_interface()
@@ -482,58 +631,41 @@ def run_lan_discovery(job_folder: str) -> list:
     with open(os.path.join(job_folder, "lan_ipconfig.txt"), "w", encoding="utf-8") as f:
         f.write(ip_proc.stdout)
 
-    # Fast parallel ping sweep of /24 subnet if connected
-    subnet_prefix = ""
+    # Fast parallel ARP cache warmup of /24 subnet if connected
     if ipv4 and re.match(r"^\d+\.\d+\.\d+\.\d+$", ipv4):
         parts = ipv4.split(".")
         subnet_prefix = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        target_ips = [f"{subnet_prefix}.{i}" for i in range(1, 255) if f"{subnet_prefix}.{i}" != ipv4]
         print(f"[*] Running fast parallel LAN discovery sweep on {subnet_prefix}.1-254...")
 
+        # 1. Instant Layer-2 ARP trigger via UDP datagrams (zero subprocess overhead, <50ms total)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_sock:
+                udp_sock.setblocking(False)
+                for ip in target_ips:
+                    try:
+                        udp_sock.sendto(b"\x00", (ip, 9))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 2. Fast parallel ICMP ping sweep (32 workers) to wake sleeping Wi-Fi clients
         def quick_ping(ip):
             subprocess.run(
-                ["ping", "-n", "1", "-w", "220", ip],
+                ["ping", "-n", "1", "-w", "180", ip],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
 
-        with ThreadPoolExecutor(max_workers=64) as ex:
-            list(ex.map(quick_ping, [f"{subnet_prefix}.{i}" for i in range(1, 255)]))
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            list(ex.map(quick_ping, target_ips))
 
     # Capture arp -a
     arp_proc = subprocess.run(["arp", "-a"], capture_output=True, text=True, errors="replace")
     with open(os.path.join(job_folder, "lan_arp_table.txt"), "w", encoding="utf-8") as f:
         f.write(arp_proc.stdout)
 
-    # Parse dynamic and relevant static unicast entries from ARP table
-    devices = []
-    seen_ips = set()
-    for line in arp_proc.stdout.splitlines():
-        m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)", line)
-        if m:
-            ip_addr, mac_raw, arp_type = m.group(1), m.group(2).lower().replace("-", ":"), m.group(3).lower()
-            # Skip multicast/broadcast (224.x, 239.x, 255.x, ff:ff:ff:ff:ff:ff)
-            first_octet = int(ip_addr.split(".")[0])
-            if first_octet >= 224 or ip_addr.endswith(".255") or mac_raw == "ff:ff:ff:ff:ff:ff":
-                continue
-            if ip_addr in seen_ips:
-                continue
-            seen_ips.add(ip_addr)
-
-            role = "LAN Host"
-            if ip_addr == gw:
-                role = "Default Gateway / Router"
-            elif ip_addr == ipv4:
-                role = "Survey Laptop"
-
-            devices.append({
-                "ip": ip_addr,
-                "mac": mac_raw,
-                "vendor": lookup_oui(mac_raw),
-                "type": arp_type,
-                "role": role
-            })
-
-    # Sort by IP last octet
-    devices.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+    devices = _parse_arp_table(arp_proc.stdout, local_ipv4=ipv4, gateway_ip=gw)
 
     csv_path = os.path.join(job_folder, "lan_devices.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
