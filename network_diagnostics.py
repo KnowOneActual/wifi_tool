@@ -383,7 +383,14 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
     """
     ctx = ssl.create_default_context()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WiFiSurveyTool/2.0"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://speed.cloudflare.com/",
+        "Origin": "https://speed.cloudflare.com",
+        "Accept": "*/*",
     }
 
     result = {
@@ -446,12 +453,13 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
         ping_thread = ThreadPoolExecutor(max_workers=1)
         ping_fut = ping_thread.submit(loaded_ping_worker, loaded_dl_samples)
 
-        def download_worker(chunk_size_bytes) -> int:
+        def download_worker(chunk_size_bytes, req_headers=None) -> int:
             worker_bytes = 0
+            hdrs = req_headers or headers
             t_end = time.perf_counter() + (duration_target_sec * 0.65)
             while time.perf_counter() < t_end:
                 url = f"https://speed.cloudflare.com/__down?bytes={chunk_size_bytes}"
-                req_dl = urllib.request.Request(url, headers=headers)
+                req_dl = urllib.request.Request(url, headers=hdrs)
                 try:
                     with urllib.request.urlopen(req_dl, timeout=6, context=ctx) as resp:
                         while True:
@@ -470,6 +478,13 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
         with ThreadPoolExecutor(max_workers=3) as dl_ex:
             futs = [dl_ex.submit(download_worker, 15_000_000) for _ in range(3)]
             dl_bytes_total = sum(f.result() for f in as_completed(futs))
+        # Fallback if primary headers were rejected (e.g. WAF 403)
+        if dl_bytes_total == 0:
+            t_dl_start = time.perf_counter()
+            fallback_headers = {"User-Agent": "curl/8.7.1", "Accept": "*/*"}
+            with ThreadPoolExecutor(max_workers=3) as dl_ex:
+                futs = [dl_ex.submit(download_worker, 15_000_000, fallback_headers) for _ in range(3)]
+                dl_bytes_total = sum(f.result() for f in as_completed(futs))
         t_dl_elapsed = max(0.1, time.perf_counter() - t_dl_start)
         dl_stop = True
         try:
