@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.0.2-beta] - 2026-11-05
+
+### Added
+- **Windows 802.11 Roaming & Handoff Log Collection (`START_SITE_SURVEY.bat`):** Automatically exports the Windows `Microsoft-Windows-WLAN-AutoConfig/Operational` roaming event log (`wlan_roaming_events.txt` via `wevtutil qe`, no elevation required) and `wlan_roaming_report.html` (`netsh wlan show wlanreport`) at the end of every room-by-room waypoint survey.
+- **AV & Custom Integrator OUI Database Expansion (`network_diagnostics.py`):** Added MAC OUI signatures for **Access Networks / Ruckus AP** (`78:9f:6a`, `40:b8:2d`), **Araknis Networks** (`14:3f:c3`), **Control4** (`00:0f:ff`), **Denon / Marantz (HEOS)** (`8c:a9:6f`), and additional **Sonos** ZonePlayer prefixes (`74:ca:60`, `38:42:0b`, `80:4a:f2`).
+
+### Fixed
+- **Access Networks / Ruckus Physical AP Consolidation (`generate_job_summary.py`):** Normalized Ruckus/Access Networks 4th-octet band offsets (`+0x40` for 2.4 GHz, `+0x80` for 5 GHz) back to the base wired Ethernet MAC so dual-band APs are grouped as a single physical Access Point (`AP 1`..`AP N`) instead of splitting 2.4 GHz and 5 GHz radios into separate AP entries.
+- **Sonos OUI Classification (`network_diagnostics.py`):** Fixed `74:ca:60` being misclassified as `"Router / Mesh AP"` instead of `"Sonos"`.
+
+---
+
 ## [2.0.1-beta] - 2026-10-28
 
 ### Added

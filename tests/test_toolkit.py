@@ -24,6 +24,10 @@ class TestWifiToolkit(unittest.TestCase):
         self.assertIn("Ubiquiti", network_diagnostics.lookup_oui("78:8a:20:11:22:33"))
         self.assertIn("eero", network_diagnostics.lookup_oui("50-61-3F-AA-BB-CC"))
         self.assertIn("Netgear", network_diagnostics.lookup_oui("28:94:01:00:11:22"))
+        self.assertIn("Ruckus", network_diagnostics.lookup_oui("78:9f:6a:4e:96:70"))
+        self.assertIn("Sonos", network_diagnostics.lookup_oui("74:ca:60:41:f7:a0"))
+        self.assertIn("Araknis", network_diagnostics.lookup_oui("14:3f:c3:97:c3:32"))
+        self.assertIn("Control4", network_diagnostics.lookup_oui("00:0f:ff:a1:e0:56"))
 
     def test_oui_lookup_laa_and_unknown(self):
         # Locally Administered Address (second hex digit is 2, 6, a, or e)
