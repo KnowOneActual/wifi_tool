@@ -126,6 +126,13 @@ goto WAYPOINT_LOOP
 :FINISH_WAYPOINTS
 echo.
 echo [+] Waypoint survey completed. Data logged to survey_waypoints.csv ^& waypoint_telemetry.csv.
+echo [*] Exporting Windows 802.11 Roaming ^& Handoff Event Log...
+wevtutil qe Microsoft-Windows-WLAN-AutoConfig/Operational /c:60 /rd:true /f:text > "%JOB_FOLDER%\wlan_roaming_events.txt" 2>nul
+netsh wlan show wlanreport duration="1" >nul 2>nul
+if exist "C:\ProgramData\Microsoft\Windows\WlanReport\wlan-report-latest.html" (
+    copy /y "C:\ProgramData\Microsoft\Windows\WlanReport\wlan-report-latest.html" "%JOB_FOLDER%\wlan_roaming_report.html" >nul 2>nul
+)
+echo [+] Saved Wi-Fi roaming event log to wlan_roaming_events.txt.
 echo.
 
 :: ===============================================================================

@@ -133,12 +133,25 @@ def generate_summary(job_folder: str):
             return target_ssid.lower() in (ssid_val or "").lower()
         return False
 
-    # Group target BSSIDs into physical APs by 5-octet MAC prefix (xx:xx:xx:xx:xx)
+    # Group target BSSIDs into physical APs by 5-octet MAC prefix (xx:xx:xx:xx:xx),
+    # normalizing Ruckus / Access Networks 4th-octet band offsets (+0x40/+0x80) back to base MAC.
+    def _normalize_ap_prefix(bssid: str) -> str:
+        clean = (bssid or "").strip().lower()
+        if len(clean) >= 14:
+            if "ruckus" in lookup_oui(clean).lower():
+                try:
+                    base_oct4 = int(clean[9:11], 16) & 0x3F
+                    return f"{clean[:8]}:{base_oct4:02x}:{clean[12:14]}"
+                except ValueError:
+                    pass
+            return clean[:14]
+        return clean
+
     ap_prefix_map = {}
     ap_details = defaultdict(lambda: {"prefix": "", "vendor": "", "radios": {}})
     if records:
         target_recs_all = [r for r in records if record_matches_target(r) and len(r.get("bssid", "")) >= 14]
-        prefixes = sorted(list(set(r.get("bssid", "")[:14] for r in target_recs_all)))
+        prefixes = sorted(list(set(_normalize_ap_prefix(r.get("bssid", "")) for r in target_recs_all)))
         for idx, pref in enumerate(prefixes, start=1):
             ap_label = f"AP {idx}"
             ap_prefix_map[pref] = ap_label
@@ -148,7 +161,7 @@ def generate_summary(job_folder: str):
         radio_lists = defaultdict(lambda: defaultdict(list))
         for r in target_recs_all:
             bssid = r.get("bssid", "")
-            pref = bssid[:14]
+            pref = _normalize_ap_prefix(bssid)
             if pref in ap_prefix_map:
                 ap_label = ap_prefix_map[pref]
                 band = r.get("band", "Unknown")
@@ -165,7 +178,7 @@ def generate_summary(job_folder: str):
     def format_ap_tag(bssid: str) -> str:
         if not bssid:
             return "N/A"
-        pref = bssid[:14]
+        pref = _normalize_ap_prefix(bssid)
         if pref in ap_prefix_map:
             return f"{ap_prefix_map[pref]} ({bssid[-5:]})"
         return bssid
