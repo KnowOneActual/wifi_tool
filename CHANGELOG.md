@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.0.3-beta] - 2026-11-23
+
+### Fixed
+- **Windows Store `python.exe` Stub Detection (`START_SITE_SURVEY.bat`, `1_Quick_Scan.bat`, `2_Log_Waypoint.bat`, `3_Capture_Packets.bat`, `4_Speed_And_Ping_Test.bat`):** Replaced the `where python` pre-flight check (which falsely passed when Microsoft's 0-byte `WindowsApps\python.exe` App Execution Alias appeared earlier in `PATH` than a real Python / `uv` / venv installation) with an executable validation loop that skips broken stubs, falls back to `py -3`, and prepends the verified Python directory to the script's local `PATH`.
+
+---
+
 ## [2.0.2-beta] - 2026-11-05
 
 ### Added

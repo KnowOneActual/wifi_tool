@@ -17,17 +17,31 @@ echo      https://github.com/KnowOneActual/wifi_tool/issues
 echo ===============================================================================
 echo.
 
-:: Pre-Flight Check: Verify Python is installed and accessible
-where python >nul 2>nul
-if errorlevel 1 (
+:: Pre-Flight Check: Find a working Python 3 executable (skips Windows Store stubs)
+set "PYTHON_EXE="
+for /f "delims=" %%p in ('where python 2^>nul') do (
+    if not defined PYTHON_EXE (
+        "%%p" --version >nul 2>nul
+        if not errorlevel 1 set "PYTHON_EXE=%%p"
+    )
+)
+if not defined PYTHON_EXE (
+    py -3 --version >nul 2>nul
+    if not errorlevel 1 (
+        for /f "delims=" %%p in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%p"
+    )
+)
+if not defined PYTHON_EXE (
     color 4F
-    echo [!] ERROR: Python 3 was not found in your system PATH.
+    echo [!] ERROR: A working Python 3 installation was not found in your system PATH.
     echo     Please install Python 3.8+ from https://www.python.org/downloads/
-    echo     ^(Make sure to check "Add python.exe to PATH" during installation^).
+    echo     ^(Make sure to check "Add python.exe to PATH" during installation,
+    echo      or disable the python.exe App Execution Alias in Windows Settings^).
     echo.
     pause
     exit /b 1
 )
+for %%d in ("%PYTHON_EXE%") do set "PATH=%%~dpd;%PATH%"
 
 :: Auto-detect currently connected SSID as default Target SSID
 set "DETECTED_SSID="
