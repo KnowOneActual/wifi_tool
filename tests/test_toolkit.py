@@ -690,6 +690,28 @@ Total Detected BSSIDs: 2 | Timestamp: 2026-11-24 08:00:00
             self.assertIn("data:image/png;base64,", html_doc)
             self.assertIn("1st Fl - Kitchen", html_doc)
             self.assertIn("renderReportHeatmap", html_doc)
+            # Script defining renderReportHeatmap must precede <img id="fpImg_0"> so synchronous data-URI onload works
+            self.assertLess(html_doc.index("window.renderReportHeatmap"), html_doc.index('id="fpImg_0"'))
+
+    def test_corrupt_truncated_csv_and_room_key_normalization(self):
+        # Truncated/short CSV rows must not crash with NoneType errors
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "job_meta.json"), "w", encoding="utf-8") as f:
+                f.write("{corrupt json")
+            with open(os.path.join(tmpdir, "survey_waypoints.csv"), "w", encoding="utf-8") as f:
+                f.write("2026-11-24T10:00:00,TruncatedRoom,SiteWiFi\n")
+            generate_job_summary.generate_summary(tmpdir)
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "PM_SITE_SURVEY_REPORT.html")))
+
+        # Room key normalization matches floor/fl/flr consistently
+        self.assertEqual(
+            compare_jobs._normalize_room_key("1st Floor Kitchen"),
+            compare_jobs._normalize_room_key("1st Fl Kitchen"),
+        )
+        self.assertEqual(
+            compare_jobs._normalize_room_key("1st Floor Kitchen"),
+            compare_jobs._normalize_room_key("1st Flr Kitchen"),
+        )
 
 
 if __name__ == "__main__":

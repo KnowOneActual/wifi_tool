@@ -24,9 +24,7 @@ def _normalize_room_key(name: str) -> str:
     """Normalize room names for resilient fuzzy matching across visits."""
     s = (name or "").lower().strip()
     s = re.sub(r"\(#\d+\)", "", s)
-    s = re.sub(r"\b(pre[- ]?fix|post[- ]?fix|before|after|1st|2nd|3rd|flr|fl|floor)\b", lambda m: {
-        "flr": "floor", "fl": "floor", "1st": "1st", "2nd": "2nd", "3rd": "3rd",
-    }.get(m.group(0), ""), s)
+    s = re.sub(r"\b(pre[- ]?fix|post[- ]?fix|before|after|flr|fl|floor)\b", "", s)
     s = re.sub(r"[^a-z0-9]+", " ", s).strip()
     tokens = sorted(s.split())
     return " ".join(tokens)

@@ -296,7 +296,7 @@ def load_waypoints_csv(csv_file: str) -> list:
             else:
                 reader = csv.DictReader(f, fieldnames=CSV_STANDARD_HEADERS)
             for row in reader:
-                records.append(row)
+                records.append({k: (v if v is not None else "") for k, v in row.items() if k is not None})
     except Exception as e:
         print(f"Error reading CSV: {e}")
     return records
@@ -604,7 +604,7 @@ def _build_floorplans_html(job_folder: str, floorplan_data: dict, wp_summaries: 
         <div class="fp-block" style="margin-bottom:20px;">
           <h3 style="margin:8px 0;font-size:14px;color:#334155;">{label} ({len(fp_pins)} pinned waypoints &mdash; 5/6 GHz RF Heatmap)</h3>
           <div style="position:relative;display:inline-block;max-width:100%;border:1px solid #cbd5e1;border-radius:8px;overflow:hidden;">
-            <img id="fpImg_{idx}" src="data:{mime};base64,{b64}" style="display:block;max-width:100%;height:auto;" onload="renderReportHeatmap({idx})">
+            <img id="fpImg_{idx}" src="data:{mime};base64,{b64}" style="display:block;max-width:100%;height:auto;" onload="if(window.renderReportHeatmap)renderReportHeatmap({idx})">
             <canvas id="fpCanvas_{idx}" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
           </div>
           <script>window._fpPins = window._fpPins || {{}}; window._fpPins[{idx}] = {pins_json};</script>
@@ -622,7 +622,7 @@ def _build_floorplans_html(job_folder: str, floorplan_data: dict, wp_summaries: 
       if (dbm >= -76) return [249, 115, 22];
       return [220, 38, 38];
     }
-    function renderReportHeatmap(idx) {
+    window.renderReportHeatmap = function(idx) {
       const img = document.getElementById("fpImg_" + idx);
       const canvas = document.getElementById("fpCanvas_" + idx);
       const pins = (window._fpPins && window._fpPins[idx]) || [];
@@ -691,14 +691,18 @@ def _build_floorplans_html(job_folder: str, floorplan_data: dict, wp_summaries: 
         ctx.fillStyle = "#ffffff";
         ctx.fillText(tag, bx, by);
       }
-    }
+    };
+    window.addEventListener("load", function() {
+      if (!window._fpPins) return;
+      Object.keys(window._fpPins).forEach(function(k) { window.renderReportHeatmap(Number(k)); });
+    });
     </script>"""
 
     return f"""
     <h2>Floorplan RF Coverage Heatmaps</h2>
     <div class="sub" style="margin-bottom:8px;">Legend: <span class="badge badge-good">&ge; -65 dBm Strong</span> <span class="badge badge-warn">-66 to -75 dBm Fair</span> <span class="badge badge-bad">&le; -76 dBm Weak</span></div>
-    {''.join(cards)}
-    {heatmap_script}"""
+    {heatmap_script}
+    {''.join(cards)}"""
 
 
 def load_csv_generic(path: str) -> list:
@@ -706,7 +710,10 @@ def load_csv_generic(path: str) -> list:
         return []
     try:
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            return list(csv.DictReader(f))
+            return [
+                {k: (v if v is not None else "") for k, v in row.items() if k is not None}
+                for row in csv.DictReader(f)
+            ]
     except Exception:
         return []
 

@@ -125,7 +125,7 @@ echo.
 :WAYPOINT_LOOP
 set "WAYPOINT="
 set /p WAYPOINT="[?] Enter Location/Room Name (append * for speedtest, or 'DONE' to finish): "
-if /i "%WAYPOINT%"=="DONE" goto FINISH_WAYPOINTS
+if /i "!WAYPOINT!"=="DONE" goto FINISH_WAYPOINTS
 if not defined WAYPOINT (
     echo [-] Location name cannot be empty. Please enter a room name or 'DONE'.
     goto WAYPOINT_LOOP

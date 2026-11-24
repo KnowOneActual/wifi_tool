@@ -19,7 +19,9 @@ Features for Field Deployment & Troubleshooting:
 
 import argparse
 import base64
+import contextlib
 import csv
+import io
 import json
 import os
 import re
@@ -243,6 +245,11 @@ def create_new_job(jobs_root: str, job_name: str, tech_name: str, target_ssid: s
         nets = sc.run_netsh_scan(live_refresh=True)
         with open(os.path.join(job_folder, "baseline_rf_scan.json"), "w", encoding="utf-8") as jf:
             json.dump(nets, jf, indent=2)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sc.print_scan_table(nets)
+        with open(os.path.join(job_folder, "baseline_rf_scan.txt"), "w", encoding="utf-8") as tf:
+            tf.write(buf.getvalue())
     except Exception:
         pass
 
@@ -1080,9 +1087,9 @@ function renderJobState(st) {
         <td>${telHtml}</td>
         <td>
           <div class="row" style="gap:5px;">
-            <button class="sec" onclick="renameWaypoint(${w.batch_idx}, '${esc(w.waypoint)}')">Rename</button>
-            <button class="sec" onclick="rescanWaypoint(${w.batch_idx}, '${esc(w.waypoint)}')">Re-Scan</button>
-            <button class="danger" onclick="deleteWaypoint(${w.batch_idx}, '${esc(w.display_name)}')">Del</button>
+            <button class="sec" onclick="renameWaypoint(${w.batch_idx})">Rename</button>
+            <button class="sec" onclick="rescanWaypoint(${w.batch_idx})">Re-Scan</button>
+            <button class="danger" onclick="deleteWaypoint(${w.batch_idx})">Del</button>
           </div>
         </td>
       </tr>`;
@@ -1248,9 +1255,9 @@ function renderPinsList() {
   const pins = getFloorPinsEnriched();
   const el = document.getElementById("fpPinsList");
   if (!pins.length) { el.innerHTML = ""; return; }
-  el.innerHTML = `<div class="chip-group">` + pins.map(p =>
+  el.innerHTML = `<div class="chip-group">` + pins.map((p, idx) =>
     `<span class="chip">${esc(p.waypoint)} ${p.dbm !== null ? '(' + p.dbm + ' dBm)' : ''} ` +
-    `<strong style="color:#fca5a5;margin-left:5px;cursor:pointer;" onclick="removePin('${esc(p.waypoint)}','${esc(p.waypoint_id || '')}')">&times;</strong></span>`
+    `<strong style="color:#fca5a5;margin-left:5px;cursor:pointer;" onclick="removePinByIndex(${idx})">&times;</strong></span>`
   ).join("") + `</div>`;
 }
 
@@ -1313,14 +1320,17 @@ async function onFloorplanClick(ev) {
   }
 }
 
-async function removePin(wpName, wid) {
+async function removePinByIndex(idx) {
+  const pins = getFloorPinsEnriched();
+  const pin = pins[idx];
+  if (!pin) return;
   try {
     const st = await api(`/api/jobs/${encodeURIComponent(currentJobId)}/floorplans/pin`, {
       method: "DELETE",
-      body: JSON.stringify({ floor_id: selectedFloorplanId, waypoint: wpName, waypoint_id: wid }),
+      body: JSON.stringify({ floor_id: selectedFloorplanId, waypoint: pin.waypoint, waypoint_id: pin.waypoint_id || "" }),
     });
     renderJobState(st);
-    toast(`Removed pin for '${wpName}'.`);
+    toast(`Removed pin for '${pin.waypoint}'.`);
   } catch (e) { toast("Remove pin error: " + e.message); }
 }
 
@@ -1349,7 +1359,7 @@ async function stopWalkTest() {
     document.getElementById("btnWalkStart").classList.remove("hidden");
     document.getElementById("btnWalkStop").classList.add("hidden");
     if (res.summary) renderWalkSnapshot(res.summary);
-    if (res.state) renderJobState(res.state);
+    if (res.state && (!res.job_id || res.job_id === currentJobId)) renderJobState(res.state);
     toast(`Walk-test saved (${res.summary.roam_count} roam(s), ${res.summary.packet_loss_pct}% loss)!`);
   } catch (e) { toast("Walk stop error: " + e.message); }
 }
@@ -1508,9 +1518,11 @@ async function captureWaypoint() {
   }
 }
 
-async function renameWaypoint(batchIdx, oldName) {
-  const newName = prompt("Correct / rename waypoint:", oldName);
-  if (!newName || newName.trim() === oldName) return;
+async function renameWaypoint(batchIdx) {
+  const wp = (currentJobState && currentJobState.waypoints || []).find(w => w.batch_idx === batchIdx);
+  if (!wp) return;
+  const newName = prompt("Correct / rename waypoint:", wp.waypoint);
+  if (!newName || newName.trim() === wp.waypoint) return;
   try {
     const st = await api(`/api/jobs/${encodeURIComponent(currentJobId)}/waypoints/${batchIdx}`, {
       method: "PATCH",
@@ -1521,27 +1533,31 @@ async function renameWaypoint(batchIdx, oldName) {
   } catch (e) { toast("Rename error: " + e.message); }
 }
 
-async function deleteWaypoint(batchIdx, label) {
-  if (!confirm(`Delete waypoint '${label}' from this job?`)) return;
+async function deleteWaypoint(batchIdx) {
+  const wp = (currentJobState && currentJobState.waypoints || []).find(w => w.batch_idx === batchIdx);
+  if (!wp) return;
+  if (!confirm(`Delete waypoint '${wp.display_name}' from this job?`)) return;
   try {
     const st = await api(`/api/jobs/${encodeURIComponent(currentJobId)}/waypoints/${batchIdx}`, {
       method: "DELETE",
     });
     renderJobState(st);
-    toast(`Deleted '${label}'.`);
+    toast(`Deleted '${wp.display_name}'.`);
   } catch (e) { toast("Delete error: " + e.message); }
 }
 
-async function rescanWaypoint(batchIdx, name) {
-  if (!confirm(`Re-scan '${name}' now? (Replaces the previous reading for this waypoint)`)) return;
-  toast(`Re-scanning '${name}'...`);
+async function rescanWaypoint(batchIdx) {
+  const wp = (currentJobState && currentJobState.waypoints || []).find(w => w.batch_idx === batchIdx);
+  if (!wp) return;
+  if (!confirm(`Re-scan '${wp.waypoint}' now? (Replaces the previous reading and preserves any floorplan pin)`)) return;
+  toast(`Re-scanning '${wp.waypoint}'...`);
   try {
     const st = await api(`/api/jobs/${encodeURIComponent(currentJobId)}/waypoints/${batchIdx}/rescan`, {
       method: "POST",
       body: JSON.stringify({}),
     });
     renderJobState(st);
-    toast(`Re-scanned '${name}'!`);
+    toast(`Re-scanned '${wp.waypoint}'!`);
   } catch (e) { toast("Re-scan error: " + e.message); }
 }
 
@@ -1818,11 +1834,11 @@ def create_server(jobs_root: str = DEFAULT_JOBS_DIR, host: str = "127.0.0.1", po
                         sess = _ACTIVE_WALK.get("session")
                         jid = _ACTIVE_WALK.get("job_id", "")
                     if sess is None:
-                        self._send_json(200, {"running": False, "summary": None})
+                        self._send_json(200, {"running": False, "job_id": "", "summary": None})
                         return
                     summary = sess.stop_and_save()
                     st = get_job_state(jobs_root, jid) if jid else None
-                    self._send_json(200, {"running": False, "summary": summary, "state": st})
+                    self._send_json(200, {"running": False, "job_id": jid, "summary": summary, "state": st})
                     return
 
                 m_wp = re.match(r"^/api/jobs/([^/]+)/waypoints$", path)
@@ -1853,7 +1869,15 @@ def create_server(jobs_root: str = DEFAULT_JOBS_DIR, host: str = "127.0.0.1", po
                         cur = get_job_state(jobs_root, job_id)
                         if b_idx < 0 or b_idx >= len(cur["waypoints"]):
                             raise IndexError("Invalid waypoint index")
-                        wp_name = cur["waypoints"][b_idx]["waypoint"]
+                        old_wp = cur["waypoints"][b_idx]
+                        wp_name = old_wp["waypoint"]
+                        old_wid = str(old_wp.get("waypoint_id", "") or "").strip()
+                        # Preserve any floorplan pins attached to this waypoint before deleting
+                        saved_pins = [
+                            dict(p) for p in cur.get("pins", [])
+                            if (old_wid and str(p.get("waypoint_id", "")).strip() == old_wid)
+                            or (not old_wid and (p.get("waypoint") or "").strip() == wp_name)
+                        ]
                         modify_waypoint_batch(jobs_root, job_id, b_idx, delete=True)
                         sc.record_waypoint(
                             wp_name,
@@ -1862,6 +1886,12 @@ def create_server(jobs_root: str = DEFAULT_JOBS_DIR, host: str = "127.0.0.1", po
                             run_speedtest=False,
                         )
                         st = get_job_state(jobs_root, job_id)
+                        if saved_pins and st["waypoints"]:
+                            new_wid = str(st["waypoints"][-1].get("waypoint_id", "") or "").strip()
+                            for sp in saved_pins:
+                                st = upsert_floorplan_pin(
+                                    jobs_root, job_id, sp["floor_id"], wp_name, sp["x"], sp["y"], waypoint_id=new_wid
+                                )
                     self._send_json(200, st)
                     return
 
@@ -1886,7 +1916,10 @@ def create_server(jobs_root: str = DEFAULT_JOBS_DIR, host: str = "127.0.0.1", po
                             })
                             with open(st_path, "w", encoding="utf-8") as sf:
                                 json.dump(existing, sf, indent=2)
-                            msg = f"Speedtest: {st_res.get('download_mbps')} / {st_res.get('upload_mbps')} Mbps ({st_res.get('bufferbloat_grade')})"
+                            if st_res.get("status") == "success":
+                                msg = f"Speedtest: {st_res.get('download_mbps')} / {st_res.get('upload_mbps')} Mbps ({st_res.get('bufferbloat_grade')})"
+                            else:
+                                msg = f"Split-hop ping saved, but Cloudflare speedtest failed: {st_res.get('error') or 'unreachable'}"
                             self._send_json(200, {"message": msg, "state": get_job_state(jobs_root, job_id)})
                             return
                         if action == "lan-sweep":
