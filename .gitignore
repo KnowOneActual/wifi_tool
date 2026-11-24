@@ -9,6 +9,7 @@ Jobs/
 *.pcap
 *.pcapng
 *.csv
+*.xlsx
 AI_PARSE_PROMPT.md
 
 # OS / Editor files

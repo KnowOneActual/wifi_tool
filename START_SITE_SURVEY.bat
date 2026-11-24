@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
-title Field Site Survey - Technician Workflow Assistant v2.0-beta
+title Field Site Survey - Technician Workflow Assistant v2.1.0-beta
 color 1F
 
 :: Ensure Jobs root directory exists
@@ -9,7 +9,7 @@ if not exist "%~dp0Jobs" mkdir "%~dp0Jobs"
 
 cls
 echo ===============================================================================
-echo          WI-FI SITE SURVEY - FIELD TECHNICIAN ASSISTANT (v2.0-BETA)
+echo         WI-FI SITE SURVEY - FIELD TECHNICIAN ASSISTANT (v2.1.0-BETA)
 echo ===============================================================================
 echo  [!] BETA TESTING NOTICE: Do not use as sole production deliverable yet.
 echo      All feedback and bug reports are welcome:
@@ -99,7 +99,7 @@ netsh wlan show drivers > "%JOB_FOLDER%\wlan_drivers.txt"
 echo [+] Saved Wi-Fi adapter driver and interface profile.
 
 echo [*] Triggering live hardware RF scan (2.4 / 5 / 6 GHz)...
-python "%~dp0survey_scanner.py" --scan > "%JOB_FOLDER%\baseline_rf_scan.txt"
+python "%~dp0survey_scanner.py" --scan --save-json "%JOB_FOLDER%\baseline_rf_scan.json" > "%JOB_FOLDER%\baseline_rf_scan.txt"
 echo [+] Baseline RF scan recorded.
 
 echo [*] Running Baseline Split-Hop Ping ^& Cloudflare Speedtest (with Bufferbloat)...
@@ -150,26 +150,28 @@ echo [+] Saved Wi-Fi roaming event log to wlan_roaming_events.txt.
 echo.
 
 :: ===============================================================================
-:: STEP 3: 802.11 Packet Capture (TShark Auto-Detect Wi-Fi)
+:: STEP 3: Wi-Fi Interface Packet Capture (TShark Auto-Detect)
 :: ===============================================================================
 echo -------------------------------------------------------------------------------
-echo [STEP 3/4] Wi-Fi Packet Capture (TShark)
+echo [STEP 3/4] Wi-Fi Interface Packet Capture (TShark - DHCP/DNS/mDNS/TCP Trace)
 echo -------------------------------------------------------------------------------
-if not exist "C:\Program Files\Wireshark\tshark.exe" (
-    echo [!] Wireshark / TShark not detected at "C:\Program Files\Wireshark\tshark.exe".
+set "TSHARK_BIN="
+for /f "delims=" %%t in ('python -c "import os; from capture_packets import resolve_tshark_path; p = resolve_tshark_path(); print(p if p and os.path.exists(p) else '')" 2^>nul') do set "TSHARK_BIN=%%t"
+if not defined TSHARK_BIN (
+    echo [!] Wireshark / TShark not detected in standard install paths or PATH.
     echo     Skipping Step 3 packet capture ^(optional^).
     goto SKIP_CAPTURE
 )
 set "DO_CAP="
-set /p DO_CAP="[?] Run Wi-Fi Packet Capture now? (Y/N, default Y): "
+set /p DO_CAP="[?] Run Wi-Fi interface packet capture now? (Y/N, default Y): "
 if /i "%DO_CAP%"=="N" goto SKIP_CAPTURE
 
 set "CAP_DUR="
 set /p CAP_DUR="[?] Enter capture duration in seconds (Default 30): "
 if not defined CAP_DUR set CAP_DUR=30
 
-echo [*] Capturing frames on auto-detected Wi-Fi interface for %CAP_DUR% seconds...
-python "%~dp0capture_packets.py" -i auto -d %CAP_DUR% -o "%JOB_FOLDER%\%CLEAN_JOB%_rf_beacons.pcapng"
+echo [*] Capturing packets on auto-detected Wi-Fi interface for %CAP_DUR% seconds...
+python "%~dp0capture_packets.py" -i auto -d %CAP_DUR% -o "%JOB_FOLDER%\%CLEAN_JOB%_wifi_capture.pcapng"
 
 :SKIP_CAPTURE
 echo.

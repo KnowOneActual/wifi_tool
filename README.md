@@ -1,7 +1,7 @@
 # Wi-Fi Site Survey Toolkit (Windows 10/11)
 
 > [!CAUTION]
-> **Beta Software (`v2.0.1-beta`)** — Currently in field validation. Verify results before using as a sole production deliverable.
+> **Beta Software (`v2.1.0-beta`)** — Currently in field validation. Verify results before using as a sole production deliverable.
 > - [Report a Bug](https://github.com/KnowOneActual/wifi_tool/issues/new?template=bug_report.yml)
 > - [Request a Feature](https://github.com/KnowOneActual/wifi_tool/issues/new?template=feature_request.yml)
 > - [Contributing Guide](CONTRIBUTING.md)
@@ -30,7 +30,18 @@ A Windows command-line site survey and network diagnostics toolkit for field tec
 
 ## Usage
 
-### Full Site Survey Workflow
+### Local Web Field Console (Recommended — Zero Dependencies)
+
+Run **`LAUNCH_WEB_UI.bat`** (or `python survey_web_ui.py`) to open the local browser console at `http://127.0.0.1:8765`:
+
+- **Live RF Signal Meter** showing real-time uncapped dBm, connected AP/channel/PHY rate, and strongest 5/6 GHz BSSID before logging.
+- **One-Click Floor, Phase (`Pre-Fix`/`Post-Fix`), and Room Presets** to prevent field typos.
+- **Inline Waypoint Correction:** Rename, Re-scan in place, or Delete any logged waypoint, and edit job metadata (`target_ssid`, notes) anytime.
+- **Floorplan Pin-Drop Heatmaps:** Upload PNG/JPG floorplans per floor, click to pin existing waypoints or click-to-survey new rooms, visualize an IDW 5/6 GHz & 2.4 GHz RF coverage heatmap live, and embed it automatically inside `PM_SITE_SURVEY_REPORT.html`.
+- **Continuous Roaming Walk-Test Mode:** Walk steadily between rooms while polling true RSSI + default-gateway pings every `0.5s` (`roaming_walk_test.py`), detecting exact BSSID roams, handoff packet drops, and embedding an SVG timeline chart into the report.
+- **Resumable Jobs & Before vs. After Comparison:** Resume existing folders under `Jobs\` or compare two visits side-by-side (`compare_jobs.py`).
+
+### Full Site Survey Workflow (CLI)
 
 Run **`START_SITE_SURVEY.bat`**. The script walks through four stages and writes all outputs to `Jobs\<JobName>_<Timestamp>\`:
 
@@ -54,10 +65,12 @@ Run **`START_SITE_SURVEY.bat`**. The script walks through four stages and writes
 
 | Script | Description |
 | :--- | :--- |
-| `1_Quick_Scan.bat` | Triggers a live `WlanScan` and prints visible 2.4 / 5 / 6 GHz BSSIDs sorted by RSSI. |
+| `LAUNCH_WEB_UI.bat` | Starts the zero-dependency local browser Field Console (live signal meter, one-click rooms, inline edit/re-scan, Before vs. After diff). |
+| `1_Quick_Scan.bat` | Triggers a live `WlanScan` + `WlanGetNetworkBssList` and prints visible 2.4 / 5 / 6 GHz BSSIDs with true dBm, channel width, and `11k/v/r` flags. |
 | `2_Log_Waypoint.bat` | Logs a single waypoint scan and active link telemetry to `survey_log.csv`. |
 | `3_Capture_Packets.bat` | Captures `.pcapng` traffic on the auto-detected Wi-Fi interface via TShark. |
 | `4_Speed_And_Ping_Test.bat` | Runs a standalone split-hop ping and Cloudflare speedtest with bufferbloat grading. |
+| `python compare_jobs.py <before> <after>` | Generates `COMPARISON_REPORT.html` & `.txt` showing room-by-room dBm deltas, speedtest gains, and AP channel changes. |
 
 ---
 

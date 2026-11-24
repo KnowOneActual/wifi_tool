@@ -8,6 +8,7 @@ import subprocess
 import urllib.request
 import ssl
 import socket
+import ipaddress
 import time
 import json
 import csv
@@ -22,23 +23,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Built-in MAC OUI Vendor Lookup Table (Common Wi-Fi APs, Mesh, Gateways, Smart Home, Client NICs)
 OUI_VENDORS = {
     "50:61:3f": "eero / Amazon (Wi-Fi 7)",
+    "f8:bb:bf": "eero / Amazon",
     "64:c2:69": "ISP / Router Gateway",
     "4e:d7:4a": "Xfinity / Comcast Gateway (Virtual)",
     "4c:d5:46": "Comcast / Arris / Technicolor",
+    "d4:e2:cb": "Comcast / Xfinity Gateway",
+    "d6:e2:cb": "Comcast / Xfinity Gateway (Virtual)",
     "28:94:01": "Netgear (Orbi / Nighthawk)",
     "2e:94:01": "Netgear (Orbi Backhaul/Guest)",
     "36:94:01": "Netgear (Orbi IoT/Virtual)",
+    "10:0c:6b": "Netgear",
+    "8c:3b:ad": "Netgear",
+    "c8:9e:43": "Netgear",
     "48:62:64": "Arlo Technologies (Camera Hub)",
     "00:24:d6": "Intel Corporate (Wireless NIC)",
     "10:65:30": "Intel Corporate (Ethernet NIC)",
     "78:9f:6a": "Access Networks / Ruckus AP",
     "40:b8:2d": "Access Networks / Ruckus AP",
     "14:3f:c3": "Araknis Networks (Router / Switch)",
+    "90:a7:c1": "Pakedge / Control4 (Router / AP)",
     "00:0f:ff": "Control4",
     "8c:a9:6f": "Denon / Marantz (HEOS)",
     "74:ca:60": "Sonos",
     "38:42:0b": "Sonos",
     "80:4a:f2": "Sonos",
+    "b8:e9:37": "Sonos",
+    "80:5e:c0": "Yealink (VoIP Phone)",
+    "a8:51:ab": "Apple",
+    "30:fd:38": "Google Nest / Home",
     "94:ff:06": "Router / Mesh AP",
     "18:a5:ff": "T-Mobile / Arcadyan Gateway",
     "bc:af:6e": "T-Mobile / Sagemcom 5G Gateway",
@@ -63,6 +75,7 @@ OUI_VENDORS = {
     "ac:8b:a9": "Ubiquiti Inc. (UniFi)",
     "b4:fb:e4": "Ubiquiti Inc. (UniFi)",
     "70:a7:41": "Ubiquiti Inc. (UniFi)",
+    "fc:ec:da": "Ubiquiti Inc. (UniFi)",
     "88:dc:96": "Senao / EnGenius",
     "00:18:0a": "Cisco Meraki",
     "88:15:44": "Cisco Meraki",
@@ -85,6 +98,48 @@ OUI_VENDORS = {
     "f0:2f:74": "ASUSTek",
 }
 
+_EXTERNAL_OUI_CACHE = None
+
+
+def _load_external_oui_table() -> dict:
+    """
+    Optionally load an offline Wireshark `manuf` or `oui_manuf.txt` file if present
+    next to the toolkit or in a local Wireshark install directory.
+    """
+    global _EXTERNAL_OUI_CACHE
+    if _EXTERNAL_OUI_CACHE is not None:
+        return _EXTERNAL_OUI_CACHE
+
+    table = {}
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "manuf"),
+        os.path.join(base_dir, "oui_manuf.txt"),
+        r"C:\Program Files\Wireshark\manuf",
+        r"C:\Program Files (x86)\Wireshark\manuf",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = re.split(r"\s+", line, maxsplit=2)
+                        if len(parts) >= 2 and re.match(r"^[0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}$", parts[0]):
+                            pref = parts[0].lower().replace("-", ":")
+                            vendor = parts[2].split("#", 1)[0].strip() if len(parts) >= 3 else parts[1].strip()
+                            if vendor and pref not in table:
+                                table[pref] = vendor
+                if table:
+                    break
+            except Exception:
+                continue
+
+    _EXTERNAL_OUI_CACHE = table
+    return table
+
 
 def lookup_oui(mac: str) -> str:
     """Return hardware vendor or LAA classification from MAC address."""
@@ -94,6 +149,9 @@ def lookup_oui(mac: str) -> str:
     prefix = clean[:8]
     if prefix in OUI_VENDORS:
         return OUI_VENDORS[prefix]
+    ext = _load_external_oui_table()
+    if prefix in ext:
+        return ext[prefix]
     # Check Locally Administered Address bit (second hex char in first octet: 2, 6, a, e)
     if len(clean) >= 2 and clean[1] in ("2", "6", "a", "e"):
         return "Virtual BSSID / Private MAC (LAA)"
@@ -575,18 +633,29 @@ def run_cloudflare_speedtest(duration_target_sec: float = 6.0) -> dict:
     return result
 
 
-def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = "") -> list:
+def _build_target_network(local_ipv4: str, subnet_mask: str = ""):
+    """Return an IPv4Network for the active Wi-Fi interface (defaults to /24 if mask unavailable)."""
+    if not local_ipv4 or not re.match(r"^\d+\.\d+\.\d+\.\d+$", local_ipv4):
+        return None
+    mask = subnet_mask.strip() if subnet_mask else "255.255.255.0"
+    try:
+        return ipaddress.IPv4Interface(f"{local_ipv4}/{mask}").network
+    except Exception:
+        try:
+            return ipaddress.IPv4Interface(f"{local_ipv4}/24").network
+        except Exception:
+            return None
+
+
+def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = "", subnet_mask: str = "") -> list:
     """
     Parse `arp -a` output into enriched LAN device dicts, filtering out multicast/broadcast/APIPA
-    and prioritizing the active Wi-Fi interface's subnet when multiple interfaces exist.
+    and scoping to the active Wi-Fi interface's actual subnet mask when multiple interfaces exist.
     """
     if not arp_output:
         return []
 
-    subnet_prefix = ""
-    if local_ipv4 and re.match(r"^\d+\.\d+\.\d+\.\d+$", local_ipv4):
-        parts = local_ipv4.split(".")
-        subnet_prefix = f"{parts[0]}.{parts[1]}.{parts[2]}."
+    target_net = _build_target_network(local_ipv4, subnet_mask)
 
     devices = []
     seen_ips = set()
@@ -599,21 +668,32 @@ def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = ""
             current_iface_ip = m_if.group(1) if m_if else ""
             continue
 
-        # If we know the active Wi-Fi IPv4, skip ARP tables belonging to unrelated virtual/loopback adapters
+        # If we know the active Wi-Fi IPv4/subnet, skip ARP tables belonging to unrelated virtual/loopback adapters
         if local_ipv4 and current_iface_ip and current_iface_ip != local_ipv4:
-            if subnet_prefix and not current_iface_ip.startswith(subnet_prefix):
-                continue
+            if target_net is not None:
+                try:
+                    if ipaddress.IPv4Address(current_iface_ip) not in target_net:
+                        continue
+                except Exception:
+                    continue
 
         m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)", s)
         if m:
             ip_addr, mac_raw, arp_type = m.group(1), m.group(2).lower().replace("-", ":"), m.group(3).lower()
-            first_octet = int(ip_addr.split(".")[0])
-            # Skip multicast/broadcast (224.x+, .255, ff:ff:ff:ff:ff:ff) and APIPA (169.254.x.x)
-            if first_octet >= 224 or ip_addr.endswith(".255") or mac_raw == "ff:ff:ff:ff:ff:ff":
+            try:
+                ip_obj = ipaddress.IPv4Address(ip_addr)
+            except Exception:
+                continue
+
+            # Skip multicast/broadcast/reserved and APIPA (unless local host itself is APIPA)
+            if ip_obj.is_multicast or ip_obj.is_loopback or mac_raw == "ff:ff:ff:ff:ff:ff":
+                continue
+            if target_net is not None:
+                if ip_obj not in target_net or ip_obj == target_net.broadcast_address or ip_obj == target_net.network_address:
+                    continue
+            elif ip_addr.endswith(".255"):
                 continue
             if ip_addr.startswith("169.254.") and not local_ipv4.startswith("169.254."):
-                continue
-            if subnet_prefix and not ip_addr.startswith(subnet_prefix):
                 continue
             if ip_addr in seen_ips:
                 continue
@@ -628,6 +708,7 @@ def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = ""
             devices.append({
                 "ip": ip_addr,
                 "mac": mac_raw,
+                "hostname": "",
                 "vendor": lookup_oui(mac_raw),
                 "type": arp_type,
                 "role": role
@@ -637,15 +718,27 @@ def _parse_arp_table(arp_output: str, local_ipv4: str = "", gateway_ip: str = ""
     return devices
 
 
-def run_lan_discovery(job_folder: str) -> list:
+def _resolve_hostname_safe(ip_addr: str) -> str:
+    """Best-effort reverse DNS lookup for a LAN IPv4 address."""
+    try:
+        host, _, _ = socket.gethostbyaddr(ip_addr)
+        if host and host != ip_addr:
+            return host.rstrip(".")
+    except Exception:
+        pass
+    return ""
+
+
+def run_lan_discovery(job_folder: str, max_sweep_hosts: int = 1024) -> list:
     """
-    Perform a fast parallel ARP warmup + ping sweep of the local /24 subnet to populate the Windows
-    ARP cache, then capture `ipconfig /all` and `arp -a`, and write an enriched `lan_devices.csv`
-    with IP, MAC, Vendor (OUI), and Role.
+    Perform a fast parallel ARP warmup + ping sweep of the local subnet (respecting the
+    adapter's actual subnet mask up to `max_sweep_hosts`), then capture `ipconfig /all` and
+    `arp -a`, resolve hostnames, and write an enriched `lan_devices.csv`.
     """
     os.makedirs(job_folder, exist_ok=True)
     wifi = get_active_wifi_interface()
     ipv4 = wifi.get("ipv4", "")
+    subnet_mask = wifi.get("subnet_mask", "")
     gw = wifi.get("gateway", "")
 
     # Save ipconfig /all
@@ -653,12 +746,16 @@ def run_lan_discovery(job_folder: str) -> list:
     with open(os.path.join(job_folder, "lan_ipconfig.txt"), "w", encoding="utf-8") as f:
         f.write(ip_proc.stdout)
 
-    # Fast parallel ARP cache warmup of /24 subnet if connected
-    if ipv4 and re.match(r"^\d+\.\d+\.\d+\.\d+$", ipv4):
-        parts = ipv4.split(".")
-        subnet_prefix = f"{parts[0]}.{parts[1]}.{parts[2]}"
-        target_ips = [f"{subnet_prefix}.{i}" for i in range(1, 255) if f"{subnet_prefix}.{i}" != ipv4]
-        print(f"[*] Running fast parallel LAN discovery sweep on {subnet_prefix}.1-254...")
+    # Fast parallel ARP cache warmup of local subnet if connected
+    target_net = _build_target_network(ipv4, subnet_mask)
+    if target_net is not None:
+        sweep_net = target_net
+        if target_net.num_addresses - 2 > max_sweep_hosts:
+            sweep_net = ipaddress.IPv4Interface(f"{ipv4}/24").network
+            print(f"[!] Large subnet detected ({target_net}); scoping active sweep to local /24 ({sweep_net}).")
+
+        target_ips = [str(ip) for ip in sweep_net.hosts() if str(ip) != ipv4]
+        print(f"[*] Running fast parallel LAN discovery sweep on {sweep_net} ({len(target_ips)} hosts)...")
 
         # 1. Instant Layer-2 ARP trigger via UDP datagrams (zero subprocess overhead, <50ms total)
         try:
@@ -687,11 +784,21 @@ def run_lan_discovery(job_folder: str) -> list:
     with open(os.path.join(job_folder, "lan_arp_table.txt"), "w", encoding="utf-8") as f:
         f.write(arp_proc.stdout)
 
-    devices = _parse_arp_table(arp_proc.stdout, local_ipv4=ipv4, gateway_ip=gw)
+    devices = _parse_arp_table(arp_proc.stdout, local_ipv4=ipv4, gateway_ip=gw, subnet_mask=subnet_mask)
+
+    # Best-effort parallel reverse DNS hostname resolution
+    if devices:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            host_futs = {ex.submit(_resolve_hostname_safe, d["ip"]): d for d in devices}
+            for fut in as_completed(host_futs):
+                try:
+                    host_futs[fut]["hostname"] = fut.result()
+                except Exception:
+                    host_futs[fut]["hostname"] = ""
 
     csv_path = os.path.join(job_folder, "lan_devices.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["ip", "mac", "vendor", "role", "type"])
+        writer = csv.DictWriter(f, fieldnames=["ip", "mac", "hostname", "vendor", "role", "type"])
         writer.writeheader()
         writer.writerows(devices)
 
